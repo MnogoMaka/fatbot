@@ -1584,7 +1584,10 @@ async def onboard_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else "❌ Нет дефицита"
     )
 
-    logger.info(f"Новый пользователь: {tg_user.username}, BMR={deficit['bmr']:.0f}, TDEE={deficit['tdee']:.0f}")
+    logger.info(
+        f"Новый пользователь: {tg_user.username}, "
+        f"BMR={base_deficit['bmr']:.0f}, TDEE={base_deficit['tdee']:.0f}"
+    )
 
     await update.message.reply_text(
         f"✅ Профиль готов!\n\n"
