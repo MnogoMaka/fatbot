@@ -1450,8 +1450,8 @@ async def onboard_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return ONBOARD_LIMIT
     context.user_data["calorie_limit"] = limit
     await update.message.reply_text(
-        "Теперь для расчёта метаболизма:\n"
-        "Введи свой рост в см (например: 180) или /skip:",
+        "Теперь для расчёта метаболизма.\n"
+        "Введи свой рост в см (например: 180):",
         reply_markup=ReplyKeyboardRemove(),
     )
     return ONBOARD_HEIGHT
@@ -1460,40 +1460,34 @@ async def onboard_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 async def onboard_height(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not is_allowed(update):
         return ConversationHandler.END
-    if update.message.text.strip().lower() == "/skip":
-        context.user_data["height_cm"] = 175
-    else:
-        try:
-            height = int(update.message.text)
-            if not 100 <= height <= 250:
-                raise ValueError
-            context.user_data["height_cm"] = height
-        except (TypeError, ValueError):
-            await update.message.reply_text("Введи число от 100 до 250 или /skip:")
-            return ONBOARD_HEIGHT
+    try:
+        height = int(update.message.text)
+        if not 100 <= height <= 250:
+            raise ValueError
+        context.user_data["height_cm"] = height
+    except (TypeError, ValueError):
+        await update.message.reply_text("Рост должен быть числом от 100 до 250 см. Попробуй ещё раз:")
+        return ONBOARD_HEIGHT
 
     # Сразу переходим к следующему шагу
-    await update.message.reply_text("Введи возраст в годах (например: 28) или /skip:")
+    await update.message.reply_text("Введи возраст в годах (например: 28):")
     return ONBOARD_AGE
 
 
 async def onboard_age(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not is_allowed(update):
         return ConversationHandler.END
-    if update.message.text.strip().lower() == "/skip":
-        context.user_data["age"] = 30
-    else:
-        try:
-            age = int(update.message.text)
-            if not 10 <= age <= 100:
-                raise ValueError
-            context.user_data["age"] = age
-        except (TypeError, ValueError):
-            await update.message.reply_text("Введи возраст от 10 до 100 или /skip:")
-            return ONBOARD_AGE
+    try:
+        age = int(update.message.text)
+        if not 10 <= age <= 100:
+            raise ValueError
+        context.user_data["age"] = age
+    except (TypeError, ValueError):
+        await update.message.reply_text("Возраст должен быть от 10 до 100 лет. Попробуй ещё раз:")
+        return ONBOARD_AGE
 
-    keyboard = ReplyKeyboardMarkup([["Мужской", "Женский"], ["/skip"]], resize_keyboard=True)
-    await update.message.reply_text("Выбери пол или /skip:", reply_markup=keyboard)
+    keyboard = ReplyKeyboardMarkup([["Мужской", "Женский"]], resize_keyboard=True)
+    await update.message.reply_text("Выбери пол:", reply_markup=keyboard)
     return ONBOARD_GENDER
 
 
@@ -1501,14 +1495,12 @@ async def onboard_gender(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not is_allowed(update):
         return ConversationHandler.END
     text = update.message.text.strip().lower()
-    if text == "/skip":
-        context.user_data["gender"] = "male"
-    elif text in ["мужской", "м", "male"]:
+    if text in ["мужской", "м", "male"]:
         context.user_data["gender"] = "male"
     elif text in ["женский", "ж", "female"]:
         context.user_data["gender"] = "female"
     else:
-        await update.message.reply_text("Выбери 'Мужской', 'Женский' или /skip:")
+        await update.message.reply_text("Выбери 'Мужской' или 'Женский' с клавиатуры.")
         return ONBOARD_GENDER
 
     keyboard = ReplyKeyboardMarkup([
