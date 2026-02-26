@@ -1,0 +1,24 @@
+# Токены и секреты
+.env
+*.key
+config.py
+
+# Данные бота (чтобы не светить свою статистику)
+data/
+*.csv
+
+# Сгенерированные изображения
+*.png
+*.jpg
+calendars/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.env/
+.DS_Store
