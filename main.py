@@ -46,7 +46,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Конфигурация доступа и путей ---
-ALLOWED_USERNAMES = {"ilyaqrc", "lookfmistakes"}
+ALLOWED_USERNAMES = {"ilyaqrc", "lookfmistakes", "Mikulyakk"}
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
