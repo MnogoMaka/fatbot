@@ -1135,8 +1135,10 @@ def compute_deficit_with_history(
     if days_counted:
         avg_daily_def_7d = total_def_7 / days_counted
     else:
-        # Если записей вообще нет, ориентируемся на сегодняшний дефицит (может быть 0)
-        avg_daily_def_7d = daily_deficit_today
+        # Если записей вообще нет, ориентируемся на плановый дефицит (TDEE - лимит),
+        # а не на нереалистичный вариант «сегодня ничего не ел».
+        planned_deficit = max(0.0, tdee - profile.calorie_limit)
+        avg_daily_def_7d = planned_deficit
 
     days_to_goal = deficit_remaining / avg_daily_def_7d if avg_daily_def_7d > 0 else float("inf")
 
