@@ -2,6 +2,7 @@ import csv
 import io
 import os
 import logging
+import tempfile
 import calendar
 import random
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Set
 from collections import defaultdict
 from badlist import BAD_LIST
+from scaner_qr import get_calories_from_image
 import pytz
 
 try:
@@ -831,7 +833,8 @@ def build_sports_calendar_image(
 (
     ONBOARD_WEIGHT, ONBOARD_TARGET, ONBOARD_LIMIT,
     ONBOARD_HEIGHT, ONBOARD_AGE, ONBOARD_GENDER, ONBOARD_ACTIVITY,
-    ADD_CALORIES, UPDATE_WEIGHT,
+    ADD_CALORIES, ADD_CALORIES_CHOICE, ADD_CALORIES_BARCODE, ADD_CALORIES_GRAMMS,
+    UPDATE_WEIGHT,
     STATS_SCOPE, STATS_MONTH_SELECT,
     SETTINGS_CHOICE, SETTINGS_NEW_TARGET, SETTINGS_NEW_LIMIT,
     SETTINGS_EDIT_BIOMETRICS, SETTINGS_EDIT_ACTIVITY,
@@ -839,7 +842,7 @@ def build_sports_calendar_image(
     EDIT_CAL_MONTH, EDIT_CAL_DAY, EDIT_CAL_VALUE,
     SPORT_MONTH, SPORT_DAY, SPORT_DESC,
     SPORTS_CAL_SCOPE, SPORTS_CAL_MONTH,
-) = range(25)
+) = range(28)
 
 MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
     [
@@ -861,6 +864,11 @@ STATS_SCOPE_KEYBOARD = ReplyKeyboardMarkup(
 SETTINGS_KEYBOARD = ReplyKeyboardMarkup(
     [["🎯 Изменить цель (вес)"], ["🔥 Изменить лимит (ккл)"],
      ["📏 Рост/возраст/пол"], ["🏃 Активность"], ["❌ Отмена"]],
+    resize_keyboard=True,
+)
+
+ADD_CALORIES_CHOICE_KEYBOARD = ReplyKeyboardMarkup(
+    [["1️⃣ Ввести число"], ["2️⃣ Отсканировать штрихкод"]],
     resize_keyboard=True,
 )
 
@@ -1155,8 +1163,147 @@ async def _finalize_onboarding(update: Update, context: ContextTypes.DEFAULT_TYP
 async def add_calories_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not is_allowed(update):
         return ConversationHandler.END
-    await update.message.reply_text("Сколько калорий в этом приёме пищи? (число суммируется к сегодняшнему):")
-    return ADD_CALORIES
+    await update.message.reply_text(
+        "Как добавить калории?",
+        reply_markup=ADD_CALORIES_CHOICE_KEYBOARD,
+    )
+    return ADD_CALORIES_CHOICE
+
+
+async def handle_add_calories_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update):
+        return ConversationHandler.END
+    text = (update.message.text or "").strip()
+    if "1" in text or "число" in text.lower() or "ввести" in text.lower():
+        await update.message.reply_text(
+            "Сколько калорий в этом приёме пищи? (число суммируется к сегодняшнему):",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ADD_CALORIES
+    if "2" in text or "штрихкод" in text.lower() or "отсканировать" in text.lower():
+        await update.message.reply_text(
+            "Отправь фото со штрихкодом продукта.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return ADD_CALORIES_BARCODE
+    await update.message.reply_text("Выбери вариант: 1 — ввести число, 2 — отсканировать штрихкод.", reply_markup=ADD_CALORIES_CHOICE_KEYBOARD)
+    return ADD_CALORIES_CHOICE
+
+
+async def handle_add_calories_barcode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update):
+        return ConversationHandler.END
+    if not update.message.photo:
+        await update.message.reply_text("Нужно отправить именно фото со штрихкодом. Либо введи калории числом:")
+        return ADD_CALORIES
+
+    users = load_users()
+    tg_user = update.effective_user
+    assert tg_user is not None
+    if tg_user.id not in users:
+        await update.message.reply_text("Сначала введи профиль командой /start.", reply_markup=MAIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+
+    photo = update.message.photo[-1]
+    tg_file = await photo.get_file()
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            path = tmp.name
+        await tg_file.download_to_drive(path)
+        result = get_calories_from_image(path)
+    except Exception as e:
+        logger.exception("Barcode scan failed: %s", e)
+        result = {"error": str(e)}
+    finally:
+        if path and os.path.exists(path):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    if "error" in result:
+        await update.message.reply_text(
+            f"❌ {result['error']}\nВведи калории вручную (число):",
+            reply_markup=MAIN_MENU_KEYBOARD,
+        )
+        return ADD_CALORIES
+
+    calories_per_100g = result.get("calories_per_100g")
+    if calories_per_100g is None:
+        await update.message.reply_text(
+            "У этого продукта в базе нет калорийности. Введи калории вручную (число):",
+            reply_markup=MAIN_MENU_KEYBOARD,
+        )
+        return ADD_CALORIES
+
+    context.user_data["barcode_product"] = result
+    await update.message.reply_text(
+        f"✅ Найден продукт: *{result.get('product_name', '?')}*\n"
+        f"Калорийность: {calories_per_100g} ккал/100 г.\n\n"
+        "Введи граммовку (сколько грамм съел):",
+        parse_mode="Markdown",
+    )
+    return ADD_CALORIES_GRAMMS
+
+
+async def handle_add_calories_gramms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update):
+        return ConversationHandler.END
+    try:
+        grams = float(update.message.text.replace(",", "."))
+        if grams <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        await update.message.reply_text("Введи положительное число грамм (например: 150).")
+        return ADD_CALORIES_GRAMMS
+
+    product = context.user_data.get("barcode_product")
+    if not product:
+        await update.message.reply_text("Сессия сброшена. Введи калории числом:", reply_markup=MAIN_MENU_KEYBOARD)
+        return ADD_CALORIES
+
+    calories_per_100g = product.get("calories_per_100g") or 0
+    calories = int(round(grams * calories_per_100g / 100.0))
+
+    users = load_users()
+    tg_user = update.effective_user
+    assert tg_user is not None
+    if tg_user.id not in users:
+        await update.message.reply_text("Сначала введи профиль командой /start.", reply_markup=MAIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+
+    entry = DailyEntry(date=date.today(), user_id=tg_user.id, username=tg_user.username or "", calories=calories)
+    append_or_update_entry(entry)
+    logger.info(f"User {tg_user.username} added {calories} kcal (barcode product, {grams}g)")
+
+    profile = users[tg_user.id]
+    all_entries = load_entries_for_user(tg_user.id)
+    deficit = compute_deficit_with_history(profile, all_entries)
+    insult = get_bad_phrase()
+    await update.message.reply_text(
+        f"Записал +{calories} ккал ({product.get('product_name', '?')}, {grams:.0f} г).\n"
+        f"{insult}\n"
+        f"Осталось сжечь до цели: {format_ru_number(deficit['deficit_remaining'])} ккал",
+        reply_markup=MAIN_MENU_KEYBOARD,
+    )
+    today_cals = int(deficit["today_calories"])
+    if today_cals > profile.calorie_limit:
+        await update.message.reply_text("АХАХАХА ну ты и лох, жри дальше. Теперь все об этом знают")
+        for user_id, prof in users.items():
+            if user_id != tg_user.id:
+                try:
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=(
+                            f"Поздравьте ЖИРОБАСА {tg_user.username}. Он сегодня объелся как свинья.\n "
+                            f"Он перебрал на {(profile.calorie_limit - today_cals) * -1} от нормы 🤬🤬🤬"
+                        ),
+                    )
+                except Exception as e:
+                    logger.warning(f"Не удалось отправить напоминание пользователю {prof.username} ({user_id}): {e}")
+    context.user_data.pop("barcode_product", None)
+    return ConversationHandler.END
 
 
 async def handle_add_calories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2229,7 +2376,15 @@ def build_application() -> "ApplicationBuilder":
             CommandHandler("add", add_calories_entry),
             MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("^🍔 Добавить калории$"), add_calories_entry),
         ],
-        states={ADD_CALORIES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_calories)]},
+        states={
+            ADD_CALORIES_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_calories_choice)],
+            ADD_CALORIES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_calories)],
+            ADD_CALORIES_BARCODE: [
+                MessageHandler(filters.PHOTO, handle_add_calories_barcode),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_calories_barcode),
+            ],
+            ADD_CALORIES_GRAMMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_calories_gramms)],
+        },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 

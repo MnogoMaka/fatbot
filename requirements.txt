@@ -7,3 +7,4 @@ gigachat
 requests
 certifi
 pyopenssl
+pyzbar
