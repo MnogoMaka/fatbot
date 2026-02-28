@@ -1,4 +1,5 @@
 import csv
+import io
 import os
 import logging
 import calendar
@@ -11,6 +12,11 @@ from typing import Dict, List, Optional, Tuple, Set
 from collections import defaultdict
 from badlist import BAD_LIST
 import pytz
+
+try:
+    from giga import generate_answer
+except ImportError:
+    generate_answer = None
 from matplotlib.patches import Rectangle, FancyBboxPatch
 from dotenv import load_dotenv
 
@@ -54,6 +60,7 @@ DATA_DIR.mkdir(exist_ok=True)
 
 USERS_CSV = DATA_DIR / "users.csv"
 ENTRIES_CSV = DATA_DIR / "entries.csv"
+WORKOUTS_CSV = DATA_DIR / "workouts.csv"
 CALENDAR_DIR = DATA_DIR / "calendars"
 CALENDAR_DIR.mkdir(exist_ok=True)
 
@@ -187,6 +194,12 @@ def ensure_csv_files() -> None:
         with ENTRIES_CSV.open("w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["date", "user_id", "username", "calories", "weight", "exercises"])
+
+    if not WORKOUTS_CSV.exists():
+        logger.info("Создание файла workouts.csv")
+        with WORKOUTS_CSV.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["date", "user_id", "username", "description"])
 
 
 def load_users() -> Dict[int, UserProfile]:
@@ -380,6 +393,127 @@ def load_entries_for_user(user_id: int) -> List[DailyEntry]:
     except Exception as e:
         logger.error(f"Ошибка загрузки записей пользователя {user_id}: {e}")
     return result
+
+
+def set_entry_calories_for_day(user_id: int, username: str, d: date, calories: int) -> None:
+    """Устанавливает (перезаписывает) калории за указанный день для пользователя."""
+    ensure_csv_files()
+    rows: List[Dict[str, str]] = []
+    found = False
+    with ENTRIES_CSV.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row["user_id"] == str(user_id) and row["date"] == d.isoformat():
+                row["calories"] = str(calories)
+                found = True
+            rows.append(row)
+    if not found:
+        rows.append({
+            "date": d.isoformat(),
+            "user_id": str(user_id),
+            "username": username,
+            "calories": str(calories),
+            "weight": "",
+            "exercises": "",
+        })
+    with ENTRIES_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["date", "user_id", "username", "calories", "weight", "exercises"])
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def set_entry_exercises_for_day(user_id: int, username: str, d: date, exercises_text: str) -> None:
+    """Записывает тренировку за день в workouts.csv (и дублирует в entries.exercises для совместимости)."""
+    ensure_csv_files()
+    text = exercises_text.strip()
+    if not text:
+        return
+    # Сохраняем в отдельную таблицу тренировок
+    rows: List[Dict[str, str]] = []
+    found = False
+    if WORKOUTS_CSV.exists():
+        with WORKOUTS_CSV.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("user_id") == str(user_id) and row.get("date") == d.isoformat():
+                    row["description"] = text
+                    row["username"] = username
+                    found = True
+                rows.append(row)
+    if not found:
+        rows.append({
+            "date": d.isoformat(),
+            "user_id": str(user_id),
+            "username": username,
+            "description": text,
+        })
+    with WORKOUTS_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["date", "user_id", "username", "description"])
+        writer.writeheader()
+        writer.writerows(rows)
+    # Дублируем в entries для обратной совместимости (одна строка на день)
+    rows_ent: List[Dict[str, str]] = []
+    found_ent = False
+    with ENTRIES_CSV.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            row = dict(row)
+            row.setdefault("exercises", "")
+            if row["user_id"] == str(user_id) and row["date"] == d.isoformat():
+                row["exercises"] = text
+                found_ent = True
+            rows_ent.append(row)
+    if not found_ent:
+        rows_ent.append({
+            "date": d.isoformat(),
+            "user_id": str(user_id),
+            "username": username,
+            "calories": "0",
+            "weight": "",
+            "exercises": text,
+        })
+    with ENTRIES_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["date", "user_id", "username", "calories", "weight", "exercises"])
+        writer.writeheader()
+        writer.writerows(rows_ent)
+
+
+def load_workouts(
+    user_id: Optional[int] = None,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+) -> List[Tuple[date, int, str, str]]:
+    """Возвращает список (date, user_id, username, description) из workouts.csv."""
+    ensure_csv_files()
+    result: List[Tuple[date, int, str, str]] = []
+    if not WORKOUTS_CSV.exists():
+        return result
+    try:
+        with WORKOUTS_CSV.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    d = date.fromisoformat(row["date"])
+                    uid = int(row["user_id"])
+                    if user_id is not None and uid != user_id:
+                        continue
+                    if year is not None and d.year != year:
+                        continue
+                    if month is not None and d.month != month:
+                        continue
+                    result.append((d, uid, row.get("username", ""), row.get("description", "").strip()))
+                except (ValueError, KeyError):
+                    continue
+    except Exception as e:
+        logger.error(f"Ошибка загрузки workouts.csv: {e}")
+    return result
+
+
+def get_available_workout_months(user_id: Optional[int] = None) -> List[Tuple[int, int]]:
+    """Месяцы, в которых есть хотя бы одна запись о тренировке."""
+    workouts = load_workouts(user_id=user_id)
+    months_set: Set[Tuple[int, int]] = set((d.year, d.month) for d, _, _, desc in workouts if desc)
+    return sorted(months_set, reverse=True)[:24]
 
 
 def compute_deficit_with_history(
@@ -625,6 +759,73 @@ def build_calendar_image(
     return path
 
 
+def build_sports_calendar_image(
+    *,
+    year: int,
+    month: int,
+    workouts: List[Tuple[date, int, str, str]],
+    personal_user_id: Optional[int] = None,
+) -> Path:
+    """Календарь: дни с тренировками отмечены (зелёный/иконка). В общем — подписи ников."""
+    cal = calendar.Calendar(firstweekday=0)
+    month_days = [d for d in cal.itermonthdates(year, month) if d.month == month]
+    daily_has_sport: Dict[date, bool] = {d: False for d in month_days}
+    daily_usernames: Dict[date, List[str]] = {d: [] for d in month_days}
+    for d, uid, username, desc in workouts:
+        if d not in daily_has_sport:
+            continue
+        if personal_user_id is not None and uid != personal_user_id:
+            continue
+        if desc:
+            daily_has_sport[d] = True
+            nick = f"@{username}" if username else f"id{uid}"
+            if nick not in daily_usernames[d]:
+                daily_usernames[d].append(nick)
+    weeks = calendar.monthcalendar(year, month)
+    n_weeks = len(weeks)
+    fig, ax = plt.subplots(figsize=(14, 2.2 + 1.6 * n_weeks))
+    for week_idx, week in enumerate(weeks):
+        for dow_idx, day_num in enumerate(week):
+            if day_num == 0:
+                continue
+            d = date(year, month, day_num)
+            has_sport = daily_has_sport.get(d, False)
+            cell_bg = "#C8E6C9" if has_sport else "#FAFAFA"
+            rect = plt.Rectangle(
+                (dow_idx, n_weeks - week_idx - 1), 1, 1,
+                facecolor=cell_bg, edgecolor="#E0E0E0", linewidth=0.5
+            )
+            ax.add_patch(rect)
+            ax.text(dow_idx + 0.02, n_weeks - week_idx - 0.15, str(day_num),
+                    ha="left", va="top", fontsize=10, color="#666666", weight="bold")
+            if has_sport:
+                if personal_user_id is None and daily_usernames.get(d):
+                    # Общая статистика: подписываем ники
+                    label = "\n".join(daily_usernames[d][:5])
+                    if len(daily_usernames[d]) > 5:
+                        label += "\n..."
+                    ax.text(dow_idx + 0.5, n_weeks - week_idx - 0.65, label,
+                            ha="center", va="center", fontsize=6, color="#1B5E20")
+                else:
+                    ax.text(dow_idx + 0.5, n_weeks - week_idx - 0.65, "🏃",
+                            ha="center", va="center", fontsize=14)
+    ax.set_xlim(0, 7)
+    ax.set_ylim(0, n_weeks)
+    ax.set_xticks(range(7))
+    ax.set_xticklabels(["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"], fontsize=9)
+    ax.set_yticks([])
+    month_name = calendar.month_name[month].capitalize()
+    title = f"{'Мои' if personal_user_id else 'Общие'} тренировки — {month_name} {year}"
+    ax.set_title(title, fontsize=13, pad=20)
+    ax.axis("off")
+    fig.tight_layout()
+    filename = f"sport_personal_{personal_user_id}_{year}_{month}.png" if personal_user_id else f"sport_global_{year}_{month}.png"
+    path = CALENDAR_DIR / filename
+    fig.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+    return path
+
+
 # --- Telegram-бот ---
 
 (
@@ -634,13 +835,20 @@ def build_calendar_image(
     STATS_SCOPE, STATS_MONTH_SELECT,
     SETTINGS_CHOICE, SETTINGS_NEW_TARGET, SETTINGS_NEW_LIMIT,
     SETTINGS_EDIT_BIOMETRICS, SETTINGS_EDIT_ACTIVITY,
-) = range(16)
+    AGENT_CHAT,
+    EDIT_CAL_MONTH, EDIT_CAL_DAY, EDIT_CAL_VALUE,
+    SPORT_MONTH, SPORT_DAY, SPORT_DESC,
+    SPORTS_CAL_SCOPE, SPORTS_CAL_MONTH,
+) = range(25)
 
 MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["🍔 Добавить калории", "⚖️ Обновить вес"],
         ["📊 Мой статус", "📅 Статистика"],
-        ["⚙️ Настройки", "⚡ Получить заряд бодрости"],
+        ["✏️ Изменить ККЛ за день", "🏃 Добавить тренировку"],
+        ["📋 Календарь тренировок", "📋 Мои записи об упражнениях"],
+        ["🏆 Рейтинг"],
+        ["⚙️ Настройки", "⚡ Получить заряд бодрости", "💬 Агент"],
     ],
     resize_keyboard=True,
 )
@@ -673,6 +881,7 @@ async def deny_access(update: Update) -> None:
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.clear()
     if not is_allowed(update):
         await deny_access(update)
         return ConversationHandler.END
@@ -1150,22 +1359,7 @@ async def stats_scope_choose(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return ConversationHandler.END
 
     keyboard = []
-    current_year = None
-
-    today = date.today()
-    keyboard.append([
-        InlineKeyboardButton(
-            f"📅 Текущий ({today.month:02d}.{today.year})",
-            callback_data=f"stats_{today.year}_{today.month:02d}"
-        )
-    ])
-    keyboard.append([InlineKeyboardButton("──────────────", callback_data="ignore")])
-
     for year, month in available_months[:12]:
-        if year != current_year:
-            current_year = year
-            keyboard.append([InlineKeyboardButton(f"📆 {year}", callback_data="ignore")])
-
         month_name = calendar.month_name[month].capitalize()
         keyboard.append([
             InlineKeyboardButton(
@@ -1182,8 +1376,7 @@ async def stats_scope_choose(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="stats_cancel")])
 
     await update.message.reply_text(
-        f"📊 Выбери месяц для просмотра статистики:\n"
-        f"Всего доступно: {len(available_months)} мес.",
+        "📊 Выбери месяц для просмотра статистики:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
     return STATS_MONTH_SELECT
@@ -1239,12 +1432,12 @@ async def stats_month_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
         month_name = calendar.month_name[month].capitalize()
 
-        with img_path.open("rb") as f:
-            await query.message.reply_photo(
-                photo=InputFile(f),
-                caption=f"{title} за {month_name} {year}",
-                reply_markup=MAIN_MENU_KEYBOARD
-            )
+        photo_bytes = img_path.read_bytes()
+        await query.message.reply_photo(
+            photo=InputFile(io.BytesIO(photo_bytes)),
+            caption=f"{title} за {month_name} {year}",
+            reply_markup=MAIN_MENU_KEYBOARD
+        )
 
         await query.edit_message_text(
             f"✅ Отправлена статистика за {month_name} {year}",
@@ -1252,8 +1445,11 @@ async def stats_month_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
     except Exception as e:
-        logger.error(f"Ошибка генерации календаря: {e}")
-        await query.answer("❌ Ошибка при построении графика")
+        logger.exception("Ошибка генерации календаря калорий: %s", e)
+        try:
+            await query.message.reply_text("❌ Ошибка при построении графика. Попробуй ещё раз.", reply_markup=MAIN_MENU_KEYBOARD)
+        except Exception:
+            pass
 
     return ConversationHandler.END
 
@@ -1473,9 +1669,14 @@ async def settings_edit_activity(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message:
-        await update.message.reply_text("Отменено.", reply_markup=MAIN_MENU_KEYBOARD)
-    return ConversationHandler.END
+    try:
+        if update.message:
+            await update.message.reply_text("Отменено.", reply_markup=MAIN_MENU_KEYBOARD)
+    except Exception as e:
+        # Логируем ошибку, но всё равно завершаем диалог
+        logger.error(f"Ошибка при отправке 'Отменено.': {e}")
+    finally:
+        return ConversationHandler.END
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1534,6 +1735,456 @@ async def send_energy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     else:
         await update.message.reply_text(insult, reply_markup=MAIN_MENU_KEYBOARD)
     return ConversationHandler.END
+
+
+def build_user_context(user_id: int) -> str:
+    """Собирает текст о пользователе из таблиц для контекста агента."""
+    users = load_users()
+    profile = users.get(user_id)
+    if not profile:
+        return "Пользователь не найден в базе."
+    entries = load_entries_for_user(user_id)
+    deficit = compute_deficit_with_history(profile, entries)
+    lines = [
+        "Данные пользователя из бота:",
+        f"Вес: {profile.current_weight:.1f} кг, цель: {profile.target_weight:.1f} кг.",
+        f"Лимит калорий: {profile.calorie_limit} ккал/день.",
+        f"Рост: {profile.height_cm} см, возраст: {profile.age}, пол: {profile.gender}.",
+        f"TDEE (расход): {deficit.get('tdee', profile.calculate_tdee()):.0f} ккал.",
+        f"Осталось сжечь до цели: {format_ru_number(deficit.get('deficit_remaining', 0))} ккал.",
+    ]
+    if entries:
+        by_date = defaultdict(int)
+        for e in entries:
+            by_date[e.date] += e.calories
+        recent = sorted(by_date.items(), reverse=True)[:14]
+        lines.append("Калории по дням (последние 2 недели): " + ", ".join(f"{d}: {c}" for d, c in recent))
+        with_ex = [(e.date, e.exercises) for e in entries if e.exercises and e.exercises.strip()]
+        if with_ex:
+            lines.append("Тренировки: " + "; ".join(f"{d}: {e[:50]}..." if len(e) > 50 else f"{d}: {e}" for d, e in with_ex[-10:]))
+    return "\n".join(lines)
+
+
+async def agent_button_hint(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Подсказка при нажатии кнопки «💬 Агент» — сам агент запускается только по /agent."""
+    if not is_allowed(update):
+        return
+    await update.message.reply_text(
+        "Для чата с агентом отправь команду /agent",
+        reply_markup=MAIN_MENU_KEYBOARD,
+    )
+
+
+async def agent_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update):
+        return ConversationHandler.END
+    if not generate_answer:
+        await update.message.reply_text("Агент недоступен (модуль giga не подключён).", reply_markup=MAIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+    await update.message.reply_text(
+        "💬 Режим агента. Напиши вопрос или сообщение — ответит помощник с учётом твоих данных из бота.\nДля выхода из режима общения напиши: «Выйти».",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return AGENT_CHAT
+
+
+async def agent_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update):
+        return ConversationHandler.END
+    if not update.message or not update.message.text:
+        return AGENT_CHAT
+    text = update.message.text.strip()
+    # Выход: по команде /cancel или по словам "выйти"/"выход"/"отмена"
+    if text.startswith("/cancel") or "выйти" in text.lower() or "выход" in text.lower() or text.lower() == "отмена":
+        await update.message.reply_text("Выход из режима агента.", reply_markup=MAIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+    tg_user = update.effective_user
+    if not tg_user:
+        return AGENT_CHAT
+    ctx = build_user_context(tg_user.id)
+    full_query = f"{ctx}\n\nВопрос пользователя: {text}"
+    try:
+        answer = generate_answer(full_query)
+        if answer is None:
+            answer = "Не удалось получить ответ. Попробуй ещё раз."
+        elif isinstance(answer, dict):
+            answer = answer.get("content", str(answer))
+        await update.message.reply_text(str(answer)[:4000])
+    except Exception as e:
+        logger.exception("Ошибка агента: %s", e)
+        await update.message.reply_text("Ошибка при обращении к агенту. Попробуй позже.")
+    return AGENT_CHAT
+
+
+# --- Изменить ККЛ за день ---
+
+async def edit_cal_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update):
+        return ConversationHandler.END
+    months = get_available_months(user_id=update.effective_user.id) if update.effective_user else []
+    today = date.today()
+    if (today.year, today.month) not in months:
+        months.insert(0, (today.year, today.month))
+    if not months:
+        await update.message.reply_text("Нет записей. Сначала добавь калории.", reply_markup=MAIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+    keyboard = []
+    for y, m in months[:12]:
+        keyboard.append([InlineKeyboardButton(f"{calendar.month_name[m]} {y}", callback_data=f"editcal_{y}_{m:02d}")])
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="editcal_cancel")])
+    await update.message.reply_text("Выбери месяц:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return EDIT_CAL_MONTH
+
+
+async def edit_cal_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Отмена.")
+    await query.message.reply_text("Главное меню:", reply_markup=MAIN_MENU_KEYBOARD)
+    return ConversationHandler.END
+
+
+async def edit_cal_month_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if query.data == "editcal_cancel":
+        await edit_cal_cancel_cb(update, context)
+        return ConversationHandler.END
+    if not query.data.startswith("editcal_"):
+        return EDIT_CAL_MONTH
+    parts = query.data.replace("editcal_", "").split("_")
+    if len(parts) < 2:
+        return EDIT_CAL_MONTH
+    try:
+        y, m = int(parts[0]), int(parts[1])
+    except ValueError:
+        return EDIT_CAL_MONTH
+    context.user_data["edit_cal_year"], context.user_data["edit_cal_month"] = y, m
+    cal = calendar.Calendar(firstweekday=0)
+    days = [d for d in cal.itermonthdates(y, m) if d.month == m]
+    keyboard = []
+    row = []
+    for i, d in enumerate(days):
+        row.append(InlineKeyboardButton(str(d.day), callback_data=f"editcalday_{d.day:02d}"))
+        if len(row) == 7:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="editcal_cancel")])
+    await query.edit_message_text(f"Выбери день ({calendar.month_name[m]} {y}):", reply_markup=InlineKeyboardMarkup(keyboard))
+    return EDIT_CAL_DAY
+
+
+async def edit_cal_day_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if query.data == "editcal_cancel":
+        await query.edit_message_text("Отмена.")
+        await query.message.reply_text("Главное меню:", reply_markup=MAIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+    if not query.data.startswith("editcalday_"):
+        return EDIT_CAL_DAY
+    try:
+        day = int(query.data.replace("editcalday_", ""))
+    except ValueError:
+        return EDIT_CAL_DAY
+    y, m = context.user_data.get("edit_cal_year"), context.user_data.get("edit_cal_month")
+    if not y or not m:
+        return ConversationHandler.END
+    try:
+        d = date(y, m, day)
+    except ValueError:
+        await query.answer("Неверная дата")
+        return EDIT_CAL_DAY
+    context.user_data["edit_cal_date"] = d
+    await query.edit_message_text(f"Введи новое значение калорий за {d.strftime('%d.%m.%Y')} (одним числом):")
+    return EDIT_CAL_VALUE
+
+
+async def edit_cal_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update):
+        return ConversationHandler.END
+    try:
+        cal_val = int(update.message.text.strip())
+        if cal_val < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        await update.message.reply_text("Введи неотрицательное целое число.")
+        return EDIT_CAL_VALUE
+    d = context.user_data.get("edit_cal_date")
+    tg_user = update.effective_user
+    if not d or not tg_user:
+        await update.message.reply_text("Ошибка. Начни заново.", reply_markup=MAIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+    set_entry_calories_for_day(tg_user.id, tg_user.username or "", d, cal_val)
+    await update.message.reply_text(f"За {d.strftime('%d.%m.%Y')} установлено {cal_val} ккал.", reply_markup=MAIN_MENU_KEYBOARD)
+    return ConversationHandler.END
+
+
+# --- Добавить тренировку ---
+
+async def sport_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update):
+        return ConversationHandler.END
+    months = get_available_months(user_id=update.effective_user.id) if update.effective_user else []
+    today = date.today()
+    if (today.year, today.month) not in months:
+        months.insert(0, (today.year, today.month))
+    if not months:
+        months = [(today.year, today.month)]
+    keyboard = [[InlineKeyboardButton("📅 Сегодня", callback_data="sport_today")]]
+    for y, m in months[:12]:
+        keyboard.append([InlineKeyboardButton(f"{calendar.month_name[m]} {y}", callback_data=f"sport_{y}_{m:02d}")])
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="sport_cancel")])
+    await update.message.reply_text("Выбери дату тренировки:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return SPORT_MONTH
+
+
+async def sport_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("Отмена.")
+    await query.message.reply_text("Главное меню:", reply_markup=MAIN_MENU_KEYBOARD)
+    return ConversationHandler.END
+
+
+async def sport_date_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if query.data == "sport_cancel":
+        await sport_cancel_cb(update, context)
+        return ConversationHandler.END
+    today = date.today()
+    if query.data == "sport_today":
+        context.user_data["sport_date"] = today
+        await query.edit_message_text("Опиши, что и сколько делал (например: бег 30 мин, приседания 3×15):")
+        return SPORT_DESC
+    if not query.data.startswith("sport_"):
+        return SPORT_MONTH
+    parts = query.data.replace("sport_", "").split("_")
+    if len(parts) == 2:
+        try:
+            y, m = int(parts[0]), int(parts[1])
+            context.user_data["sport_year"], context.user_data["sport_month"] = y, m
+            cal = calendar.Calendar(firstweekday=0)
+            days = [d for d in cal.itermonthdates(y, m) if d.month == m]
+            keyboard = []
+            row = []
+            for d in days:
+                row.append(InlineKeyboardButton(str(d.day), callback_data=f"sportday_{d.day:02d}"))
+                if len(row) == 7:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
+            keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="sport_cancel")])
+            await query.edit_message_text("Выбери день:", reply_markup=InlineKeyboardMarkup(keyboard))
+            return SPORT_DAY
+        except (ValueError, TypeError):
+            pass
+    return SPORT_MONTH
+
+
+async def sport_day_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if query.data == "sport_cancel":
+        await query.edit_message_text("Отмена.")
+        await query.message.reply_text("Главное меню:", reply_markup=MAIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+    if not query.data.startswith("sportday_"):
+        return SPORT_DAY
+    try:
+        day = int(query.data.replace("sportday_", ""))
+    except ValueError:
+        return SPORT_DAY
+    y, m = context.user_data.get("sport_year"), context.user_data.get("sport_month")
+    if y and m:
+        try:
+            context.user_data["sport_date"] = date(y, m, day)
+        except ValueError:
+            pass
+    await query.edit_message_text("Опиши, что и сколько делал (например: бег 30 мин, приседания 3×15):")
+    return SPORT_DESC
+
+
+async def sport_desc(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update):
+        return ConversationHandler.END
+    text = update.message.text.strip()
+    if not text:
+        await update.message.reply_text("Введи текст тренировки.")
+        return SPORT_DESC
+    d = context.user_data.get("sport_date")
+    tg_user = update.effective_user
+    if not d or not tg_user:
+        await update.message.reply_text("Ошибка. Начни заново.", reply_markup=MAIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+    set_entry_exercises_for_day(tg_user.id, tg_user.username or "", d, text)
+    await update.message.reply_text(f"Тренировка за {d.strftime('%d.%m.%Y')} записана.", reply_markup=MAIN_MENU_KEYBOARD)
+    return ConversationHandler.END
+
+
+# --- Календарь тренировок ---
+
+async def sports_calendar_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update):
+        return ConversationHandler.END
+    keyboard = [["👤 Мой календарь тренировок"], ["🌍 Общий календарь тренировок"], ["❌ Отмена"]]
+    await update.message.reply_text("Что показать?", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
+    return SPORTS_CAL_SCOPE
+
+
+async def sports_calendar_scope(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update):
+        return ConversationHandler.END
+    text = update.message.text.strip().lower()
+    if "мой" in text or "👤" in text:
+        context.user_data["sports_cal_scope"] = "personal"
+        user_id = update.effective_user.id if update.effective_user else None
+    elif "общ" in text or "🌍" in text:
+        context.user_data["sports_cal_scope"] = "global"
+        user_id = None
+    else:
+        await update.message.reply_text("Отмена.", reply_markup=MAIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+    context.user_data["sports_cal_user_id"] = user_id
+    months = get_available_workout_months(user_id=user_id)
+    today = date.today()
+    if (today.year, today.month) not in months:
+        months.insert(0, (today.year, today.month))
+    months = months[:12]
+    keyboard = []
+    for y, m in months:
+        keyboard.append([InlineKeyboardButton(f"{calendar.month_name[m]} {y}", callback_data=f"sportscal_{y}_{m:02d}")])
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="sportscal_cancel")])
+    await update.message.reply_text("Выбери месяц:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return SPORTS_CAL_MONTH
+
+
+async def sports_calendar_month_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if query.data == "sportscal_cancel":
+        await query.edit_message_text("Отмена.")
+        await query.message.reply_text("Главное меню:", reply_markup=MAIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+    if not query.data.startswith("sportscal_"):
+        return SPORTS_CAL_MONTH
+    parts = query.data.replace("sportscal_", "").split("_")
+    if len(parts) < 2:
+        return SPORTS_CAL_MONTH
+    try:
+        y, m = int(parts[0]), int(parts[1])
+    except ValueError:
+        return SPORTS_CAL_MONTH
+    try:
+        user_id = context.user_data.get("sports_cal_user_id")
+        workouts = load_workouts(user_id=user_id, year=y, month=m)
+        img_path = build_sports_calendar_image(year=y, month=m, workouts=workouts, personal_user_id=user_id)
+        photo_bytes = img_path.read_bytes()
+        await query.message.reply_photo(
+            photo=InputFile(io.BytesIO(photo_bytes)),
+            caption=f"Календарь тренировок — {calendar.month_name[m]} {y}",
+            reply_markup=MAIN_MENU_KEYBOARD,
+        )
+        await query.edit_message_text("Отправлено.", reply_markup=None)
+    except Exception as e:
+        logger.exception("Ошибка календаря тренировок: %s", e)
+        try:
+            await query.message.reply_text("❌ Ошибка при построении календаря.", reply_markup=MAIN_MENU_KEYBOARD)
+        except Exception:
+            pass
+    return ConversationHandler.END
+
+
+# --- Мои записи об упражнениях ---
+
+async def view_my_exercises(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    tg_user = update.effective_user
+    if not tg_user:
+        return
+    workouts = load_workouts(user_id=tg_user.id)
+    workouts.sort(key=lambda x: x[0], reverse=True)
+    if not workouts:
+        await update.message.reply_text("Пока нет записей об упражнениях. Добавь тренировку через «🏃 Добавить тренировку».", reply_markup=MAIN_MENU_KEYBOARD)
+        return
+    lines = ["📋 Твои записи об упражнениях:\n"]
+    for d, _, _, desc in workouts[:50]:
+        if desc:
+            lines.append(f"📅 {d.strftime('%d.%m.%Y')}: {desc[:200]}{'…' if len(desc) > 200 else ''}")
+    await update.message.reply_text("\n".join(lines)[:4000], reply_markup=MAIN_MENU_KEYBOARD)
+
+
+# --- Рейтинг ---
+
+def compute_rankings(users: Dict[int, UserProfile], entries: List[DailyEntry]) -> Tuple[List[Tuple[str, int]], List[Tuple[str, int]], List[Tuple[str, int]]]:
+    """(a) дни в лимите, (b) макс стрик в лимите, (c) кол-во дней с тренировками (из workouts.csv)."""
+    by_user_cals: Dict[int, Dict[date, int]] = defaultdict(lambda: defaultdict(int))
+    for e in entries:
+        by_user_cals[e.user_id][e.date] += e.calories
+    by_user_ex: Dict[int, Set[date]] = defaultdict(set)
+    for d, uid, _, desc in load_workouts():
+        if desc:
+            by_user_ex[uid].add(d)
+    limit_ok_count: Dict[int, int] = {}
+    max_streak: Dict[int, int] = {}
+    for uid, profile in users.items():
+        limit = profile.calorie_limit
+        daily = by_user_cals.get(uid, {})
+        limit_ok_count[uid] = sum(1 for d, c in daily.items() if c > 0 and c <= limit)
+        streak, best = 0, 0
+        for d in sorted(daily.keys(), reverse=True):
+            if daily[d] > 0 and daily[d] <= limit:
+                streak += 1
+            else:
+                best = max(best, streak)
+                streak = 0
+        max_streak[uid] = max(best, streak)
+    a = [(users[uid].username or f"id{uid}", limit_ok_count.get(uid, 0)) for uid in users]
+    b = [(users[uid].username or f"id{uid}", max_streak.get(uid, 0)) for uid in users]
+    c = [(users[uid].username or f"id{uid}", len(by_user_ex.get(uid, set()))) for uid in users]
+    a.sort(key=lambda x: x[1], reverse=True)
+    b.sort(key=lambda x: x[1], reverse=True)
+    c.sort(key=lambda x: x[1], reverse=True)
+    return a, b, c
+
+
+async def show_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not is_allowed(update):
+        return
+    users = load_users()
+    if not users:
+        await update.message.reply_text("Нет данных для рейтинга.", reply_markup=MAIN_MENU_KEYBOARD)
+        return
+    entries = []
+    ensure_csv_files()
+    with ENTRIES_CSV.open("r", newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            try:
+                d = date.fromisoformat(row["date"])
+                entries.append(DailyEntry(d, int(row["user_id"]), row.get("username", ""), int(row.get("calories") or 0), None, row.get("exercises", "")))
+            except (ValueError, KeyError):
+                pass
+    a, b, c = compute_rankings(users, entries)
+    lines = [
+        "🏆 Рейтинг",
+        "",
+        "📊 Дней в рамках лимита (не перебрал):",
+    ]
+    for i, (name, cnt) in enumerate(a, 1):
+        lines.append(f"  {i}. @{name}: {cnt}")
+    lines.extend(["", "🔥 Лучший стрик подряд (дней в лимите):"])
+    for i, (name, cnt) in enumerate(b, 1):
+        lines.append(f"  {i}. @{name}: {cnt}")
+    lines.extend(["", "🏃 Больше всего тренировок (дней с записью):"])
+    for i, (name, cnt) in enumerate(c, 1):
+        lines.append(f"  {i}. @{name}: {cnt}")
+    await update.message.reply_text("\n".join(lines), reply_markup=MAIN_MENU_KEYBOARD)
+
 
 from telegram.error import TimedOut, NetworkError
 from httpcore import ConnectTimeout
@@ -1601,7 +2252,8 @@ def build_application() -> "ApplicationBuilder":
         ],
         states={
             STATS_SCOPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, stats_scope_choose)],
-            STATS_MONTH_SELECT: [CallbackQueryHandler(stats_month_callback)],
+            # ✅ ДОБАВЬТЕ pattern="^stats_"
+            STATS_MONTH_SELECT: [CallbackQueryHandler(stats_month_callback, pattern="^stats_")],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
@@ -1627,6 +2279,8 @@ def build_application() -> "ApplicationBuilder":
     app.add_handler(stats_conv)
     app.add_handler(settings_conv)
     app.add_handler(CommandHandler("cancel", cancel))
+    # Не добавляем глобальный /cancel — тогда /cancel обрабатывается только активным диалогом
+    # и состояние агента/других сценариев корректно сбрасывается.
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("energy", send_energy))
     app.add_handler(
@@ -1635,6 +2289,76 @@ def build_application() -> "ApplicationBuilder":
             send_energy,
         )
     )
+
+    # Агент — только по команде /agent, чтобы не включался от других сообщений
+    agent_conv = ConversationHandler(
+        entry_points=[CommandHandler("agent", agent_start)],
+        states={
+            AGENT_CHAT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, agent_message),
+                CommandHandler("cancel", cancel),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(agent_conv)
+    # Кнопка «💬 Агент» не запускает диалог — только подсказка
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND & filters.Regex("^💬 Агент$"),
+            agent_button_hint,
+        )
+    )
+
+    # Изменить ККЛ за день
+    edit_cal_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("^✏️ Изменить ККЛ за день$"), edit_cal_start),
+        ],
+        states={
+            EDIT_CAL_MONTH: [CallbackQueryHandler(edit_cal_month_cb, pattern="^editcal_")],
+            EDIT_CAL_DAY: [
+                CallbackQueryHandler(edit_cal_day_cb, pattern="^editcalday_"),
+                CallbackQueryHandler(edit_cal_cancel_cb, pattern="^editcal_cancel$"),
+            ],
+            EDIT_CAL_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_cal_value)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(edit_cal_conv)
+
+    # Добавить тренировку
+    sport_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("^🏃 Добавить тренировку$"), sport_start),
+        ],
+        states={
+            SPORT_MONTH: [CallbackQueryHandler(sport_date_cb, pattern="^sport_")],
+            SPORT_DAY: [
+                CallbackQueryHandler(sport_day_cb, pattern="^sportday_"),
+                CallbackQueryHandler(sport_cancel_cb, pattern="^sport_cancel$"),
+            ],
+            SPORT_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, sport_desc)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(sport_conv)
+
+    # Календарь тренировок
+    sports_cal_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("^📋 Календарь тренировок$"), sports_calendar_start),
+        ],
+        states={
+            SPORTS_CAL_SCOPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, sports_calendar_scope)],
+            SPORTS_CAL_MONTH: [CallbackQueryHandler(sports_calendar_month_cb, pattern="^sportscal_")],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(sports_cal_conv)
+
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("^📋 Мои записи об упражнениях$"), view_my_exercises))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("^🏆 Рейтинг$"), show_ranking))
 
     # Планировщик напоминаний: каждый день в 15:00 и 22:00 по Москве
     job_queue = app.job_queue
