@@ -1289,15 +1289,16 @@ async def handle_add_calories_gramms(update: Update, context: ContextTypes.DEFAU
     )
     today_cals = int(deficit["today_calories"])
     if today_cals > profile.calorie_limit:
-        await update.message.reply_text("АХАХАХА ну ты и лох, жри дальше. Теперь все об этом знают")
+        ccl = profile.calorie_limit
+        await update.message.reply_text(f"АХАХАХА ну ты и лох, жри дальше. Теперь все об этом знают.")
         for user_id, prof in users.items():
             if user_id != tg_user.id:
                 try:
                     await context.bot.send_message(
                         chat_id=user_id,
                         text=(
-                            f"Поздравьте ЖИРОБАСА {tg_user.username}. Он сегодня объелся как свинья.\n "
-                            f"Он перебрал на {(profile.calorie_limit - today_cals) * -1} от нормы 🤬🤬🤬"
+                            f"Поздравьте ЖИРОБАСА @{tg_user.username}. Он сегодня объелся как свинья."
+                            f"Он перебрал на {(ccl - today_cals) * -1} от нормы 🤬🤬🤬"
                         ),
                     )
                 except Exception as e:
@@ -1344,19 +1345,20 @@ async def handle_add_calories(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Если уже превысил лимит по калориям — отдельная «наградная» фраза
     today_cals = int(deficit["today_calories"])
     if today_cals > profile.calorie_limit:
+        ccl = profile.calorie_limit
         await update.message.reply_text("АХАХАХА ну ты и лох, жри дальше. Теперь все об этом знают")
-        for user_id, profile in users.items():
+        for user_id, prof in users.items():
             if user_id != tg_user.id:
                 try:
                     await context.bot.send_message(
                         chat_id=user_id,
                         text=(
-                            f"Поздравьте ЖИРОБАСА {tg_user.username}. Он сегодня объелся как свинья.\n "
-                            f"Он перебрал на {(profile.calorie_limit - today_cals) * -1} от нормы 🤬🤬🤬"
+                            f"Поздравьте ЖИРОБАСА @{tg_user.username}. Он сегодня объелся как свинья.\n "
+                            f"Он перебрал на {(ccl - today_cals) * -1} от нормы 🤬🤬🤬"
                         ),
                     )
                 except Exception as e:
-                    logger.warning(f"Не удалось отправить напоминание пользователю {profile.username} ({user_id}): {e}")
+                    logger.warning(f"Не удалось отправить напоминание пользователю {prof.username} ({user_id}): {e}")
 
 
     return ConversationHandler.END
