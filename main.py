@@ -695,22 +695,34 @@ def compute_deficit_with_history(
 
 
 def compute_streak(user_id: int, entries: List[DailyEntry], calorie_limit: int) -> int:
-    """Считает текущий стрик — кол-во последовательных дней без превышения лимита ккал."""
-    by_date: Dict[date, int] = defaultdict(int)
+    """
+    Считает стрик — кол-во последовательных дней С ЗАПИСЯМИ и без превышения лимита.
+    Дни без записей НЕ считаются «чистыми»: если за прошлый день нет данных — стрик прерван.
+    Сегодняшний день пропускается, если ещё не было записей (день не закончен).
+    """
+    by_date: Dict[date, int] = {}
     for e in entries:
         if e.user_id == user_id:
-            by_date[e.date] += e.calories
+            by_date[e.date] = by_date.get(e.date, 0) + e.calories
+
     today = date.today()
     streak = 0
     d = today
-    while True:
-        cals = by_date.get(d, 0)
-        if cals > calorie_limit:
+
+    while (today - d).days <= 90:
+        if d not in by_date:
+            if d == today:
+                # Сегодня ещё нет записей — пропускаем, идём на вчера
+                d -= timedelta(days=1)
+                continue
+            else:
+                # Прошлый день без записи — стрик прерывается
+                break
+        if by_date[d] > calorie_limit:
             break
         streak += 1
         d -= timedelta(days=1)
-        if (today - d).days > 90:
-            break
+
     return streak
 
 
