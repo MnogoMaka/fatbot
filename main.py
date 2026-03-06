@@ -80,11 +80,22 @@ def get_bad_phrase() -> str:
 
 # --- Модели данных ---
 
+class GoalMode(str, Enum):
+    LOSS = "loss"
+    GAIN = "gain"
+
+
 class Role(str, Enum):
+    # --- Режим похудения ---
     FATTY = "Жиртрест"
     PIG = "Кабан"
     ALMOST_FIT = "Почти соска"
     NORMAL = "Норм чел"
+    # --- Режим набора ---
+    SKELETON = "Скелет"
+    THIN = "Дрищ"
+    ALMOST_BUFF = "Почти качок"
+    BUFF = "Качок"
 
 
 @dataclass
@@ -99,10 +110,23 @@ class UserProfile:
     gender: str = "male"
     activity_level: float = 1.375
     start_weight: Optional[float] = None
+    cheat_meals: int = 0
 
     def __post_init__(self):
         if self.start_weight is None:
             self.start_weight = self.current_weight
+
+    @property
+    def goal_mode(self) -> "GoalMode":
+        """Определяет режим: похудение или набор веса."""
+        start = self.start_weight if self.start_weight else self.current_weight
+        if self.target_weight > start:
+            return GoalMode.GAIN
+        return GoalMode.LOSS
+
+    @property
+    def is_gaining(self) -> bool:
+        return self.goal_mode == GoalMode.GAIN
 
     def calculate_bmr(self) -> float:
         """Формула Миффлина-Сан Жеора (сколько организм тратит в покое)"""
@@ -116,57 +140,89 @@ class UserProfile:
 
     def get_deficit_progress(self, today_calories: int = 0) -> Dict[str, float]:
         """
-        Расчёт прогресса дефицита калорий.
+        Универсальный расчёт прогресса — работает и для похудения, и для набора.
         today_calories — фактически потреблённые калории сегодня (из entries.csv)
         """
         kcal_per_kg = 7700
         start = self.start_weight if self.start_weight else self.current_weight
-
-        # Всего нужно сжечь для достижения цели
-        total_deficit = max(0, (start - self.target_weight)) * kcal_per_kg
-
-        # Уже сожжено — по факту потери веса (объективный показатель)
-        achieved = max(0, (start - self.current_weight)) * kcal_per_kg
-
-        # Остаток
-        remaining = max(0, total_deficit - achieved)
-
-        # TDEE и ежедневный дефицит
         tdee = self.calculate_tdee()
-        daily_deficit = max(0, tdee - today_calories)  # ✅ Используем фактическое потребление!
 
-        # Прогноз
-        days_to_goal = remaining / daily_deficit if daily_deficit > 0 else float('inf')
-
-        return {
-            'total_deficit_needed': total_deficit,
-            'deficit_achieved': achieved,
-            'deficit_remaining': remaining,
-            'daily_deficit': daily_deficit,
-            'days_to_goal': days_to_goal,
-            'tdee': tdee,
-            'bmr': self.calculate_bmr(),
-            'today_calories': today_calories,
-        }
+        if self.is_gaining:
+            # === РЕЖИМ НАБОРА ВЕСА ===
+            total_surplus_needed = max(0, (self.target_weight - start)) * kcal_per_kg
+            achieved = max(0, (self.current_weight - start)) * kcal_per_kg
+            remaining = max(0, total_surplus_needed - achieved)
+            daily_surplus = max(0, today_calories - tdee)
+            days_to_goal = remaining / daily_surplus if daily_surplus > 0 else float('inf')
+            return {
+                'total_deficit_needed': total_surplus_needed,
+                'deficit_achieved': achieved,
+                'deficit_remaining': remaining,
+                'daily_deficit': daily_surplus,
+                'days_to_goal': days_to_goal,
+                'tdee': tdee,
+                'bmr': self.calculate_bmr(),
+                'today_calories': today_calories,
+            }
+        else:
+            # === РЕЖИМ ПОХУДЕНИЯ ===
+            total_deficit = max(0, (start - self.target_weight)) * kcal_per_kg
+            achieved = max(0, (start - self.current_weight)) * kcal_per_kg
+            remaining = max(0, total_deficit - achieved)
+            daily_deficit = max(0, tdee - today_calories)
+            days_to_goal = remaining / daily_deficit if daily_deficit > 0 else float('inf')
+            return {
+                'total_deficit_needed': total_deficit,
+                'deficit_achieved': achieved,
+                'deficit_remaining': remaining,
+                'daily_deficit': daily_deficit,
+                'days_to_goal': days_to_goal,
+                'tdee': tdee,
+                'bmr': self.calculate_bmr(),
+                'today_calories': today_calories,
+            }
 
     @property
     def progress_percent(self) -> float:
-        start = self.start_weight if self.start_weight else max(self.current_weight, self.target_weight * 1.5)
-        if start <= self.target_weight:
-            return 100.0
-        progress = (start - self.current_weight) / (start - self.target_weight)
+        """Прогресс к цели в процентах (работает для обоих режимов)."""
+        start = self.start_weight if self.start_weight else self.current_weight
+        if self.is_gaining:
+            # Набор: прогресс = (current - start) / (target - start)
+            total = self.target_weight - start
+            if total <= 0:
+                return 100.0
+            progress = (self.current_weight - start) / total
+        else:
+            # Похудение: прогресс = (start - current) / (start - target)
+            if start <= self.target_weight:
+                return 100.0
+            progress = (start - self.current_weight) / (start - self.target_weight)
         return max(0.0, min(100.0, progress * 100))
+
+    @property
+    def weight_progress_percent(self) -> float:
+        """Прогресс по весу (алиас для progress_percent)."""
+        return self.progress_percent
 
     @property
     def role(self) -> Role:
         p = self.progress_percent
-        if p < 25:
-            return Role.FATTY
-        if p < 50:
-            return Role.PIG
-        if p < 80:
-            return Role.ALMOST_FIT
-        return Role.NORMAL
+        if self.is_gaining:
+            if p < 25:
+                return Role.SKELETON
+            if p < 50:
+                return Role.THIN
+            if p < 80:
+                return Role.ALMOST_BUFF
+            return Role.BUFF
+        else:
+            if p < 25:
+                return Role.FATTY
+            if p < 50:
+                return Role.PIG
+            if p < 80:
+                return Role.ALMOST_FIT
+            return Role.NORMAL
 
 
 @dataclass
@@ -188,7 +244,7 @@ def ensure_csv_files() -> None:
             writer = csv.writer(f)
             writer.writerow([
                 "user_id", "username", "current_weight", "target_weight", "calorie_limit",
-                "height_cm", "age", "gender", "activity_level", "start_weight"
+                "height_cm", "age", "gender", "activity_level", "start_weight", "cheat_meals"
             ])
 
     if not ENTRIES_CSV.exists():
@@ -224,6 +280,7 @@ def load_users() -> Dict[int, UserProfile]:
                         gender=row.get("gender") or "male",
                         activity_level=float(row.get("activity_level") or 1.375),
                         start_weight=float(row["start_weight"]) if row.get("start_weight") else None,
+                    cheat_meals=int(row.get("cheat_meals") or 0),
                     )
                 except (ValueError, KeyError) as e:
                     logger.warning(f"Ошибка парсинга строки пользователя: {row}, ошибка: {e}")
@@ -241,7 +298,7 @@ def save_users(users: Dict[int, UserProfile]) -> None:
             writer = csv.writer(f)
             writer.writerow([
                 "user_id", "username", "current_weight", "target_weight", "calorie_limit",
-                "height_cm", "age", "gender", "activity_level", "start_weight"
+                "height_cm", "age", "gender", "activity_level", "start_weight", "cheat_meals"
             ])
             for u in users.values():
                 writer.writerow([
@@ -255,6 +312,7 @@ def save_users(users: Dict[int, UserProfile]) -> None:
                     u.gender,
                     f"{u.activity_level:.3f}",
                     f"{u.start_weight:.2f}" if u.start_weight else "",
+                    str(u.cheat_meals),
                 ])
         logger.info(f"Сохранено пользователей: {len(users)}")
     except Exception as e:
@@ -523,16 +581,14 @@ def compute_deficit_with_history(
     entries: List[DailyEntry],
 ) -> Dict[str, float]:
     """
-    Расчёт дефицита:
+    Универсальный расчёт прогресса (и для похудения, и для набора):
     - по весу (объективно),
-    - по калориям (накопленный дефицит),
-    - прогноз по среднему дефициту за 7 дней.
+    - по калориям (накопленный дефицит / профицит),
+    - прогноз по среднему за 7 дней.
     """
     kcal_per_kg = 7700
     start = profile.start_weight if profile.start_weight else profile.current_weight
-
-    total_deficit_needed = max(0.0, (start - profile.target_weight)) * kcal_per_kg
-    deficit_achieved_weight = max(0.0, (start - profile.current_weight)) * kcal_per_kg
+    gaining = profile.is_gaining
 
     # Калории по дням
     daily_cals: Dict[date, int] = defaultdict(int)
@@ -543,56 +599,136 @@ def compute_deficit_with_history(
 
     tdee = profile.calculate_tdee()
     bmr = profile.calculate_bmr()
-
     today = date.today()
     today_calories = daily_cals.get(today, 0)
-    daily_deficit_today = max(0.0, tdee - today_calories)
 
-    # Накопленный дефицит по калориям за всё время
-    deficit_achieved_calories = 0.0
-    for d, cals in daily_cals.items():
-        day_def = max(0.0, tdee - cals)
-        deficit_achieved_calories += day_def
+    if gaining:
+        # === РЕЖИМ НАБОРА ВЕСА ===
+        total_needed = max(0.0, (profile.target_weight - start)) * kcal_per_kg
+        achieved_weight = max(0.0, (profile.current_weight - start)) * kcal_per_kg
+        daily_surplus_today = max(0.0, today_calories - tdee)
 
-    # Эффективно засчитываем максимум из «по весу» и «по калориям»
-    deficit_achieved_effective = max(deficit_achieved_weight, deficit_achieved_calories)
-    deficit_remaining = max(0.0, total_deficit_needed - deficit_achieved_effective)
+        # Накопленный профицит по калориям за всё время
+        achieved_calories = 0.0
+        for d, cals in daily_cals.items():
+            day_surplus = max(0.0, cals - tdee)
+            achieved_calories += day_surplus
 
-    # Средний дефицит за последние 7 дней (включая сегодня),
-    # но считаем только по дням, где есть записи по калориям.
-    total_def_7 = 0.0
-    days_counted = 0
-    for i in range(7):
-        d = today - timedelta(days=i)
-        if d in daily_cals:
-            cals = daily_cals[d]
-            day_def = max(0.0, tdee - cals)
-            total_def_7 += day_def
-            days_counted += 1
+        achieved_effective = max(achieved_weight, achieved_calories)
+        remaining = max(0.0, total_needed - achieved_effective)
 
-    if days_counted:
-        avg_daily_def_7d = total_def_7 / days_counted
+        # Средний профицит за 7 дней
+        total_7 = 0.0
+        days_counted = 0
+        for i in range(7):
+            d = today - timedelta(days=i)
+            if d in daily_cals:
+                day_surplus = max(0.0, daily_cals[d] - tdee)
+                total_7 += day_surplus
+                days_counted += 1
+
+        if days_counted:
+            avg_daily_7d = total_7 / days_counted
+        else:
+            planned_surplus = max(0.0, profile.calorie_limit - tdee)
+            avg_daily_7d = planned_surplus
+
+        days_to_goal = remaining / avg_daily_7d if avg_daily_7d > 0 else float("inf")
+
+        return {
+            "total_deficit_needed": total_needed,       # (в данном случае = total_surplus_needed)
+            "deficit_achieved_weight": achieved_weight,  # (= surplus_achieved_weight)
+            "deficit_achieved_calories": achieved_calories,
+            "deficit_achieved_effective": achieved_effective,
+            "deficit_remaining": remaining,              # (= surplus_remaining)
+            "daily_deficit_today": daily_surplus_today,   # (= daily_surplus_today)
+            "avg_daily_deficit_7d": avg_daily_7d,
+            "days_to_goal": days_to_goal,
+            "tdee": tdee,
+            "bmr": bmr,
+            "today_calories": today_calories,
+        }
     else:
-        # Если записей вообще нет, ориентируемся на плановый дефицит (TDEE - лимит),
-        # а не на нереалистичный вариант «сегодня ничего не ел».
-        planned_deficit = max(0.0, tdee - profile.calorie_limit)
-        avg_daily_def_7d = planned_deficit
+        # === РЕЖИМ ПОХУДЕНИЯ ===
+        total_needed = max(0.0, (start - profile.target_weight)) * kcal_per_kg
+        achieved_weight = max(0.0, (start - profile.current_weight)) * kcal_per_kg
+        daily_deficit_today = max(0.0, tdee - today_calories)
 
-    days_to_goal = deficit_remaining / avg_daily_def_7d if avg_daily_def_7d > 0 else float("inf")
+        achieved_calories = 0.0
+        for d, cals in daily_cals.items():
+            day_def = max(0.0, tdee - cals)
+            achieved_calories += day_def
 
-    return {
-        "total_deficit_needed": total_deficit_needed,
-        "deficit_achieved_weight": deficit_achieved_weight,
-        "deficit_achieved_calories": deficit_achieved_calories,
-        "deficit_achieved_effective": deficit_achieved_effective,
-        "deficit_remaining": deficit_remaining,
-        "daily_deficit_today": daily_deficit_today,
-        "avg_daily_deficit_7d": avg_daily_def_7d,
-        "days_to_goal": days_to_goal,
-        "tdee": tdee,
-        "bmr": bmr,
-        "today_calories": today_calories,
-    }
+        achieved_effective = max(achieved_weight, achieved_calories)
+        remaining = max(0.0, total_needed - achieved_effective)
+
+        total_7 = 0.0
+        days_counted = 0
+        for i in range(7):
+            d = today - timedelta(days=i)
+            if d in daily_cals:
+                day_def = max(0.0, tdee - daily_cals[d])
+                total_7 += day_def
+                days_counted += 1
+
+        if days_counted:
+            avg_daily_7d = total_7 / days_counted
+        else:
+            planned_deficit = max(0.0, tdee - profile.calorie_limit)
+            avg_daily_7d = planned_deficit
+
+        days_to_goal = remaining / avg_daily_7d if avg_daily_7d > 0 else float("inf")
+
+        return {
+            "total_deficit_needed": total_needed,
+            "deficit_achieved_weight": achieved_weight,
+            "deficit_achieved_calories": achieved_calories,
+            "deficit_achieved_effective": achieved_effective,
+            "deficit_remaining": remaining,
+            "daily_deficit_today": daily_deficit_today,
+            "avg_daily_deficit_7d": avg_daily_7d,
+            "days_to_goal": days_to_goal,
+            "tdee": tdee,
+            "bmr": bmr,
+            "today_calories": today_calories,
+        }
+
+
+def compute_streak(user_id: int, entries: List[DailyEntry], calorie_limit: int) -> int:
+    """Считает текущий стрик — кол-во последовательных дней без превышения лимита ккал."""
+    by_date: Dict[date, int] = defaultdict(int)
+    for e in entries:
+        if e.user_id == user_id:
+            by_date[e.date] += e.calories
+    today = date.today()
+    streak = 0
+    d = today
+    while True:
+        cals = by_date.get(d, 0)
+        if cals > calorie_limit:
+            break
+        streak += 1
+        d -= timedelta(days=1)
+        if (today - d).days > 90:
+            break
+    return streak
+
+
+def check_and_award_cheat_meal(profile: "UserProfile", entries: List[DailyEntry], users: Dict) -> bool:
+    """
+    Начисляет читмил если стрик >= 14 и нет нарушения сегодня. Макс 2 читмила.
+    Возвращает True, если читмил был начислен.
+    """
+    today_cals = sum(e.calories for e in entries if e.user_id == profile.user_id and e.date == date.today())
+    if today_cals > profile.calorie_limit:
+        return False
+    streak = compute_streak(profile.user_id, entries, profile.calorie_limit)
+    if streak >= 14 and profile.cheat_meals < 2:
+        profile.cheat_meals += 1
+        save_users(users)
+        return True
+    return False
+
 
 
 # --- Построение календаря ---
@@ -842,7 +978,8 @@ def build_sports_calendar_image(
     EDIT_CAL_MONTH, EDIT_CAL_DAY, EDIT_CAL_VALUE,
     SPORT_MONTH, SPORT_DAY, SPORT_DESC,
     SPORTS_CAL_SCOPE, SPORTS_CAL_MONTH,
-) = range(28)
+    CHANGE_DIET_CONFIRM,
+) = range(29)
 
 MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
     [
@@ -851,6 +988,7 @@ MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
         ["✏️ Изменить ККЛ за день", "🏃 Добавить тренировку"],
         ["📋 Календарь тренировок", "📋 Мои записи об упражнениях"],
         ["🏆 Рейтинг"],
+        ["🔄 Изменить диету"],
         ["⚙️ Настройки", "⚡ Получить заряд бодрости", "💬 Агент"],
     ],
     resize_keyboard=True,
@@ -905,11 +1043,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         profile = users[tg_user.id]
         all_entries = load_entries_for_user(tg_user.id)
         deficit = compute_deficit_with_history(profile, all_entries)
+        gaining = profile.is_gaining
+        remaining_label = "📈 Осталось набрать" if gaining else "📉 Осталось сжечь"
         await update.message.reply_text(
             f"С возвращением, {tg_user.first_name}!\n\n"
+            f"{'📈 Режим: набор веса' if gaining else '📉 Режим: похудение'}\n"
             f"⚖️ Вес: {profile.current_weight:.1f} кг (цель: {profile.target_weight:.1f})\n"
             f"🔥 Лимит: {profile.calorie_limit} ккал | TDEE: {deficit['tdee']:.0f} ккал\n"
-            f"📉 Осталось сжечь: {format_ru_number(deficit['deficit_remaining'])} ккал\n"
+            f"{remaining_label}: {format_ru_number(deficit['deficit_remaining'])} ккал\n"
             f"🏆 Звание: {profile.role.value}",
             reply_markup=MAIN_MENU_KEYBOARD,
         )
@@ -1089,27 +1230,35 @@ async def onboard_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     users[tg_user.id] = profile
     save_users(users)
 
-    # На старте используем чисто расчётный дефицит (по весу ещё рано судить)
+    # На старте используем чисто расчётный показатель
     base_deficit = profile.get_deficit_progress()
+    gaining = profile.is_gaining
+    daily_val = base_deficit["daily_deficit"]
     days_forecast = (
         f"~{base_deficit['days_to_goal']:.0f} дней"
-        if base_deficit["daily_deficit"] > 0
-        else "❌ Нет дефицита"
+        if daily_val > 0
+        else ("❌ Нет профицита" if gaining else "❌ Нет дефицита")
     )
 
     logger.info(
         f"Новый пользователь: {tg_user.username}, "
-        f"BMR={base_deficit['bmr']:.0f}, TDEE={base_deficit['tdee']:.0f}"
+        f"BMR={base_deficit['bmr']:.0f}, TDEE={base_deficit['tdee']:.0f}, "
+        f"mode={'gain' if gaining else 'loss'}"
     )
 
+    action_word = "набрать" if gaining else "сжечь"
+    daily_label = "Ежедневный профицит" if gaining else "Ежедневный дефицит"
+    mode_label = "📈 Режим: набор веса" if gaining else "📉 Режим: похудение"
+
     await update.message.reply_text(
-        f"✅ Профиль готов!\n\n"
+        f"✅ Профиль готов!\n"
+        f"{mode_label}\n\n"
         f"🔥 Твой метаболизм:\n"
         f"   BMR (покой): {base_deficit['bmr']:.0f} ккал/день\n"
         f"   TDEE (с активностью): {base_deficit['tdee']:.0f} ккал/день\n\n"
-        f"🎯 Для цели нужно сжечь: {format_ru_number(base_deficit['total_deficit_needed'])} ккал\n"
+        f"🎯 Для цели нужно {action_word}: {format_ru_number(base_deficit['total_deficit_needed'])} ккал\n"
         f"📊 При лимите {profile.calorie_limit} ккал/день:\n"
-        f"   Ежедневный дефицит: ~{base_deficit['daily_deficit']:.0f} ккал\n"
+        f"   {daily_label}: ~{daily_val:.0f} ккал\n"
         f"   Прогноз до цели: {days_forecast}\n\n"
         f"🏆 Звание: {profile.role.value}",
         reply_markup=MAIN_MENU_KEYBOARD,
@@ -1139,18 +1288,29 @@ async def _finalize_onboarding(update: Update, context: ContextTypes.DEFAULT_TYP
     save_users(users)
 
     deficit = profile.get_deficit_progress()
-    days_forecast = f"~{deficit['days_to_goal']:.0f} дней" if deficit['daily_deficit'] > 0 else "❌ Нет дефицита"
+    gaining = profile.is_gaining
+    daily_val = deficit['daily_deficit']
+    days_forecast = (
+        f"~{deficit['days_to_goal']:.0f} дней"
+        if daily_val > 0
+        else ("❌ Нет профицита" if gaining else "❌ Нет дефицита")
+    )
 
     logger.info(f"Новый пользователь: {tg_user.username}, BMR={deficit['bmr']:.0f}, TDEE={deficit['tdee']:.0f}")
 
+    action_word = "набрать" if gaining else "сжечь"
+    daily_label = "Ежедневный профицит" if gaining else "Ежедневный дефицит"
+    mode_label = "📈 Режим: набор веса" if gaining else "📉 Режим: похудение"
+
     await update.message.reply_text(
-        f"✅ Профиль готов!\n\n"
+        f"✅ Профиль готов!\n"
+        f"{mode_label}\n\n"
         f"🔥 Твой метаболизм:\n"
         f"   BMR (покой): {deficit['bmr']:.0f} ккал/день\n"
         f"   TDEE (с активностью): {deficit['tdee']:.0f} ккал/день\n\n"
-        f"🎯 Для цели нужно сжечь: {format_ru_number(deficit['total_deficit_needed'])} ккал\n"
+        f"🎯 Для цели нужно {action_word}: {format_ru_number(deficit['total_deficit_needed'])} ккал\n"
         f"📊 При лимите {profile.calorie_limit} ккал/день:\n"
-        f"   Ежедневный дефицит: ~{format_ru_number(deficit['daily_deficit'])} ккал\n"
+        f"   {daily_label}: ~{format_ru_number(daily_val)} ккал\n"
         f"   Прогноз до цели: {days_forecast}\n\n"
         f"🏆 Звание: {profile.role.value}",
         reply_markup=MAIN_MENU_KEYBOARD,
@@ -1281,28 +1441,44 @@ async def handle_add_calories_gramms(update: Update, context: ContextTypes.DEFAU
     all_entries = load_entries_for_user(tg_user.id)
     deficit = compute_deficit_with_history(profile, all_entries)
     insult = get_bad_phrase()
+    gaining = profile.is_gaining
+    remaining_label = "Осталось набрать до цели" if gaining else "Осталось сжечь до цели"
     await update.message.reply_text(
         f"Записал +{calories} ккал ({product.get('product_name', '?')}, {grams:.0f} г).\n"
         f"{insult}\n"
-        f"Осталось сжечь до цели: {format_ru_number(deficit['deficit_remaining'])} ккал",
+        f"{remaining_label}: {format_ru_number(deficit['deficit_remaining'])} ккал",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
     today_cals = int(deficit["today_calories"])
-    if today_cals > profile.calorie_limit:
-        ccl = profile.calorie_limit
-        await update.message.reply_text(f"АХАХАХА ну ты и лох, жри дальше. Теперь все об этом знают.")
-        for user_id, prof in users.items():
-            if user_id != tg_user.id:
-                try:
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=(
-                            f"Поздравьте ЖИРОБАСА @{tg_user.username}. Он сегодня объелся как свинья."
-                            f"Он перебрал на {(ccl - today_cals) * -1} от нормы 🤬🤬🤬"
-                        ),
-                    )
-                except Exception as e:
-                    logger.warning(f"Не удалось отправить напоминание пользователю {prof.username} ({user_id}): {e}")
+    ccl = profile.calorie_limit
+    if not profile.is_gaining and today_cals > ccl * 1.10:
+        if profile.cheat_meals > 0:
+            profile.cheat_meals -= 1
+            save_users(users)
+            await update.message.reply_text(
+                f"🍕 Ты превысил лимит, но у тебя был читмил! Он использован, стрик сохранён.\n"
+                f"Осталось читмилов: {profile.cheat_meals}"
+            )
+        else:
+            await update.message.reply_text(f"АХАХАХА ну ты и лох, жри дальше. Теперь все об этом знают.")
+            for other_uid, prof in users.items():
+                if other_uid != tg_user.id:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=other_uid,
+                            text=(
+                                f"Поздравьте ЖИРОБАСА @{tg_user.username}. Он сегодня объелся как свинья."
+                                f"Он перебрал на {today_cals - ccl} ккал от нормы 🤬🤬🤬"
+                            ),
+                        )
+                    except Exception as e:
+                        logger.warning(f"Не удалось отправить сообщение {prof.username} ({other_uid}): {e}")
+    awarded_bar = check_and_award_cheat_meal(profile, all_entries, users)
+    if awarded_bar:
+        streak_now = compute_streak(tg_user.id, all_entries, profile.calorie_limit)
+        await update.message.reply_text(
+            f"🎉 Стрик {streak_now} дней без нарушений! +1 читмил. Всего: {profile.cheat_meals}"
+        )
     context.user_data.pop("barcode_product", None)
     return ConversationHandler.END
 
@@ -1335,31 +1511,48 @@ async def handle_add_calories(update: Update, context: ContextTypes.DEFAULT_TYPE
     all_entries = load_entries_for_user(tg_user.id)
     deficit = compute_deficit_with_history(profile, all_entries)
     insult = get_bad_phrase()
+    gaining = profile.is_gaining
+    remaining_label = "Осталось набрать до цели" if gaining else "Осталось сжечь до цели"
     await update.message.reply_text(
         f"Записал +{calories} ккал.\n"
         f"{insult}\n"
-        f"Осталось сжечь до цели: {format_ru_number(deficit['deficit_remaining'])} ккал",
+        f"{remaining_label}: {format_ru_number(deficit['deficit_remaining'])} ккал",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
 
-    # Если уже превысил лимит по калориям — отдельная «наградная» фраза
+    # Уведомление при превышении / недоборе лимита
     today_cals = int(deficit["today_calories"])
-    if today_cals > profile.calorie_limit:
-        ccl = profile.calorie_limit
-        await update.message.reply_text("АХАХАХА ну ты и лох, жри дальше. Теперь все об этом знают")
-        for user_id, prof in users.items():
-            if user_id != tg_user.id:
-                try:
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text=(
-                            f"Поздравьте ЖИРОБАСА @{tg_user.username}. Он сегодня объелся как свинья.\n "
-                            f"Он перебрал на {(ccl - today_cals) * -1} от нормы 🤬🤬🤬"
-                        ),
-                    )
-                except Exception as e:
-                    logger.warning(f"Не удалось отправить напоминание пользователю {prof.username} ({user_id}): {e}")
-
+    # Жиробас только при превышении > 10% лимита
+    ccl = profile.calorie_limit
+    if not profile.is_gaining and today_cals > ccl * 1.10:
+        if profile.cheat_meals > 0:
+            profile.cheat_meals -= 1
+            save_users(users)
+            await update.message.reply_text(
+                f"🍕 Ты превысил лимит, но у тебя был читмил! Он использован, стрик сохранён.\n"
+                f"Осталось читмилов: {profile.cheat_meals}"
+            )
+        else:
+            await update.message.reply_text("АХАХАХА ну ты и лох, жри дальше. Теперь все об этом знают")
+            for other_uid, prof in users.items():
+                if other_uid != tg_user.id:
+                    try:
+                        await context.bot.send_message(
+                            chat_id=other_uid,
+                            text=(
+                                f"Поздравьте ЖИРОБАСА @{tg_user.username}. Он сегодня объелся как свинья.\n"
+                                f"Он перебрал на {today_cals - ccl} ккал от нормы 🤬🤬🤬"
+                            ),
+                        )
+                    except Exception as e:
+                        logger.warning(f"Не удалось отправить сообщение {prof.username} ({other_uid}): {e}")
+    # Начисляем читмил при стрике >= 14 дней
+    awarded_cal = check_and_award_cheat_meal(profile, all_entries, users)
+    if awarded_cal:
+        streak_now = compute_streak(tg_user.id, all_entries, profile.calorie_limit)
+        await update.message.reply_text(
+            f"🎉 Стрик {streak_now} дней без нарушений! +1 читмил. Всего: {profile.cheat_meals}"
+        )
 
     return ConversationHandler.END
 
@@ -1404,13 +1597,19 @@ async def handle_update_weight(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # Пересчитываем метаболизм с новым весом
     deficit = profile.get_deficit_progress()
+    gaining = profile.is_gaining
+
+    if gaining:
+        remaining_label = "📈 Осталось набрать"
+    else:
+        remaining_label = "📉 Осталось сжечь"
 
     await update.message.reply_text(
         f"⚖️ Вес обновлен: {old_weight:.1f} ➡️ {weight:.1f} кг\n\n"
         f"🔥 Метаболизм пересчитан:\n"
         f"   BMR: {deficit['bmr']:.0f} ккал/день\n"
         f"   TDEE: {deficit['tdee']:.0f} ккал/день\n\n"
-        f"📉 Осталось сжечь: {format_ru_number(deficit['deficit_remaining'])} ккал\n"
+        f"{remaining_label}: {format_ru_number(deficit['deficit_remaining'])} ккал\n"
         f"🏆 Звание: {profile.role.value}",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
@@ -1435,39 +1634,98 @@ async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     all_entries = load_entries_for_user(tg_user.id)
     deficit = compute_deficit_with_history(profile, all_entries)
     today_calories = int(deficit["today_calories"])
+    gaining = profile.is_gaining
 
+    # --- Прогноз дней ---
     if deficit["avg_daily_deficit_7d"] > 0 and deficit["deficit_remaining"] > 0:
         days_forecast = f"~{deficit['days_to_goal']:.0f} дней"
     elif deficit["deficit_remaining"] <= 0:
         days_forecast = "🎉 Цель достигнута!"
     else:
-        days_forecast = "❌ Дефицита нет (лимит ≥ расход)"
+        if gaining:
+            days_forecast = "❌ Профицита нет (лимит ≤ расход)"
+        else:
+            days_forecast = "❌ Дефицита нет (лимит ≥ расход)"
 
+    # --- Прогресс-бар по ВЕСУ ---
+    weight_pct = profile.weight_progress_percent
+    bar_len = 20
+    w_filled = int(bar_len * weight_pct / 100)
+    weight_bar = "█" * w_filled + "░" * (bar_len - w_filled)
+    weight_bar_text = f"[{weight_bar}] {weight_pct:.1f}%"
+
+    # --- Прогресс-бар по КАЛОРИЯМ ---
     total = deficit["total_deficit_needed"]
-    achieved_effective = deficit["deficit_achieved_effective"]
+    achieved_cals = deficit["deficit_achieved_calories"]
     if total > 0:
-        pct = min(100, achieved_effective / total * 100)
-        bar_len = 20
-        filled = int(bar_len * pct / 100)
-        progress_bar = "█" * filled + "░" * (bar_len - filled)
-        progress_text = f"[{progress_bar}] {pct:.1f}%"
+        cal_pct = min(100, achieved_cals / total * 100)
+        c_filled = int(bar_len * cal_pct / 100)
+        cal_bar = "█" * c_filled + "░" * (bar_len - c_filled)
+        cal_bar_text = f"[{cal_bar}] {cal_pct:.1f}%"
     else:
-        progress_text = "─" * 22 + " 100%"
+        cal_bar_text = "─" * 22 + " 100%"
+
+    if gaining:
+        # === РЕЖИМ НАБОРА ===
+        action_word = "набрать"
+        action_done_weight = "Набрано по весу"
+        action_done_cal = "Набрано по калориям"
+        action_effective = "В зачёт идёт"
+        action_remaining = "Осталось набрать"
+        daily_label = "Профицит за сегодня"
+        avg_label = "среднему профициту"
+    else:
+        # === РЕЖИМ ПОХУДЕНИЯ ===
+        action_word = "сжечь"
+        action_done_weight = "Сожжено по весу"
+        action_done_cal = "Сожжено по калориям"
+        action_effective = "В зачёт идёт"
+        action_remaining = "Осталось сжечь"
+        daily_label = "Дефицит за сегодня"
+        avg_label = "среднему дефициту"
+
+    # --- Стрик, читмилы, звание ---
+    users_now = load_users()
+    profile_fresh = users_now.get(tg_user.id, profile)
+    streak = compute_streak(profile_fresh.user_id, all_entries, profile_fresh.calorie_limit)
+    awarded = check_and_award_cheat_meal(profile_fresh, all_entries, users_now)
+    if awarded:
+        await update.message.reply_text(
+            f"🎉 Стрик {streak} дней без нарушений! +1 читмил. Всего: {profile_fresh.cheat_meals}"
+        )
+
+    streak_str = f"\n🔥 *Стрик*: {streak} дней без нарушений"
+    cheat_str = ""
+    if profile_fresh.cheat_meals > 0:
+        cheat_str = f"\n🍕 *Читмилы*: {profile_fresh.cheat_meals} шт. (защищают стрик при превышении лимита)"
+
+    today_status = ""
+    if not gaining and today_calories > profile_fresh.calorie_limit * 1.10:
+        overage = today_calories - profile_fresh.calorie_limit
+        today_status = f"\n🚨 *Статус сегодня*: ЖИРОБАС — перебор на {overage} ккал!"
+    elif gaining and profile_fresh.calorie_limit > 0 and 0 < today_calories < profile_fresh.calorie_limit * 0.80:
+        today_status = f"\n⚠️ *Статус сегодня*: СКЕЛЕТ — недобор {profile_fresh.calorie_limit - today_calories} ккал"
 
     text = (
-        f"📊 *Статус на {date.today().strftime('%d.%m.%Y')}*\n\n"
+        f"📊 *Статус на {date.today().strftime('%d.%m.%Y')}*\n"
+        f"{'📈 Режим: набор веса' if gaining else '📉 Режим: похудение'}\n"
+        f"🏆 *Звание*: {profile_fresh.role.value}"
+        f"{today_status}"
+        f"{streak_str}"
+        f"{cheat_str}\n\n"
         f"🔥 *Баланс калорий*:\n"
         f"   Потреблено сегодня: {today_calories} ккал\n"
         f"   TDEE (расход): {deficit['tdee']:.0f} ккал\n"
-        f"   Дефицит за сегодня: *{deficit['daily_deficit_today']:.0f} ккал*\n\n"
+        f"   {daily_label}: *{deficit['daily_deficit_today']:.0f} ккал*\n\n"
         f"🎯 *Путь к цели*:\n"
-        f"   Всего нужно сжечь: {format_ru_number(deficit['total_deficit_needed'])} ккал\n"
-        f"   ✅ Уже сжжено по весу: {format_ru_number(deficit['deficit_achieved_weight'])} ккал\n"
-        f"   📉 Уже сжжено по калориям: {format_ru_number(deficit['deficit_achieved_calories'])} ккал\n"
-        f"   🔥 В зачёт идёт: {format_ru_number(deficit['deficit_achieved_effective'])} ккал\n"
-        f"   Осталось сжечь: {format_ru_number(deficit['deficit_remaining'])} ккал\n"
-        f"   🗓️ Прогноз (по среднему дефициту 7 дней): {days_forecast}\n\n"
-        f"📈 Прогресс: {progress_text}"
+        f"   Всего нужно {action_word}: {format_ru_number(deficit['total_deficit_needed'])} ккал\n"
+        f"   ✅ {action_done_weight}: {format_ru_number(deficit['deficit_achieved_weight'])} ккал\n"
+        f"   {'📈' if gaining else '📉'} {action_done_cal}: {format_ru_number(deficit['deficit_achieved_calories'])} ккал\n"
+        f"   🔥 {action_effective}: {format_ru_number(deficit['deficit_achieved_effective'])} ккал\n"
+        f"   {action_remaining}: {format_ru_number(deficit['deficit_remaining'])} ккал\n"
+        f"   🗓️ Прогноз (по {avg_label} 7 дней): {days_forecast}\n\n"
+        f"⚖️ *Прогресс по весу*: {weight_bar_text}\n"
+        f"🔥 *Прогресс по калориям*: {cal_bar_text}"
     )
     await update.message.reply_text(text, reply_markup=MAIN_MENU_KEYBOARD, parse_mode="Markdown")
     return ConversationHandler.END
@@ -1679,9 +1937,13 @@ async def settings_new_target(update: Update, context: ContextTypes.DEFAULT_TYPE
     # Для оценки остатка используем историю калорий, если она есть
     all_entries = load_entries_for_user(tg_user.id)
     deficit = compute_deficit_with_history(profile, all_entries)
+    gaining = profile.is_gaining
+    remaining_label = "Осталось набрать" if gaining else "Осталось сжечь"
+    mode_label = "📈 Режим: набор веса" if gaining else "📉 Режим: похудение"
     await update.message.reply_text(
         f"Цель изменена: {old_target:.1f} ➡️ {weight:.1f} кг\n"
-        f"Осталось сжечь: {format_ru_number(deficit['deficit_remaining'])} ккал",
+        f"{mode_label}\n"
+        f"{remaining_label}: {format_ru_number(deficit['deficit_remaining'])} ккал",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
     return ConversationHandler.END
@@ -1709,18 +1971,21 @@ async def settings_new_limit(update: Update, context: ContextTypes.DEFAULT_TYPE)
     save_users(users)
     logger.info(f"User {tg_user.username} changed limit: {old_limit} -> {limit}")
 
-    # Обновляем прогноз с учётом среднего дефицита за 7 дней
+    # Обновляем прогноз с учётом среднего дефицита/профицита за 7 дней
     all_entries = load_entries_for_user(tg_user.id)
     deficit = compute_deficit_with_history(profile, all_entries)
+    gaining = profile.is_gaining
+    no_progress_label = "❌ Нет профицита" if gaining else "❌ Нет дефицита"
+    avg_label = "Средний профицит за 7 дней" if gaining else "Средний дефицит за 7 дней"
     days_forecast = (
         f"~{deficit['days_to_goal']:.0f} дней"
         if deficit['avg_daily_deficit_7d'] > 0 and deficit['deficit_remaining'] > 0
-        else ("🎉 Цель достигнута!" if deficit['deficit_remaining'] <= 0 else "❌ Нет дефицита")
+        else ("🎉 Цель достигнута!" if deficit['deficit_remaining'] <= 0 else no_progress_label)
     )
 
     await update.message.reply_text(
         f"Лимит изменен: {old_limit} ➡️ {limit} ккал\n"
-        f"Средний дефицит за 7 дней: {deficit['avg_daily_deficit_7d']:.0f} ккал/день\n"
+        f"{avg_label}: {deficit['avg_daily_deficit_7d']:.0f} ккал/день\n"
         f"Прогноз: {days_forecast}",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
@@ -1767,7 +2032,7 @@ async def settings_edit_biometrics(update: Update, context: ContextTypes.DEFAULT
         f"🔥 Новый метаболизм:\n"
         f"   BMR: {deficit['bmr']:.0f} ккал/день\n"
         f"   TDEE: {deficit['tdee']:.0f} ккал/день\n"
-        f"   Средний дефицит за 7 дней: {deficit['avg_daily_deficit_7d']:.0f} ккал/день",
+        f"   {'Средний профицит' if profile.is_gaining else 'Средний дефицит'} за 7 дней: {deficit['avg_daily_deficit_7d']:.0f} ккал/день",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
     return ConversationHandler.END
@@ -1811,7 +2076,7 @@ async def settings_edit_activity(update: Update, context: ContextTypes.DEFAULT_T
         f"🔥 Новый метаболизм:\n"
         f"   BMR: {deficit['bmr']:.0f} ккал/день\n"
         f"   TDEE: {deficit['tdee']:.0f} ккал/день\n"
-        f"   Средний дефицит за 7 дней: {deficit['avg_daily_deficit_7d']:.0f} ккал/день",
+        f"   {'Средний профицит' if profile.is_gaining else 'Средний дефицит'} за 7 дней: {deficit['avg_daily_deficit_7d']:.0f} ккал/день",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
     return ConversationHandler.END
@@ -1834,11 +2099,17 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     text = (
         "🧠 Как считает бот:\n"
-        "- *По весу*: сколько кг ты уже сбросил, × 7 700 ккал → «уже сжжено по весу».\n"
-        "- *По калориям*: по каждому дню считает: TDEE − съеденные ккал (если в минусе — 0) "
-        "и копит это как «уже сжжено по калориям».\n"
-        "- В зачёт идёт максимум из этих двух величин.\n"
-        "- Прогноз дней до цели считается по *среднему дефициту за последние 7 дней*.\n\n"
+        "Бот поддерживает два режима: *похудение* и *набор веса*.\n"
+        "Режим определяется автоматически: если целевой вес > стартового — набор, иначе — похудение.\n\n"
+        "*Режим похудения:*\n"
+        "- *По весу*: сколько кг ты уже сбросил × 7 700 ккал → «сожжено по весу».\n"
+        "- *По калориям*: по каждому дню: TDEE − съеденные ккал (мин 0) → «сожжено по калориям».\n\n"
+        "*Режим набора:*\n"
+        "- *По весу*: сколько кг ты уже набрал × 7 700 ккал → «набрано по весу».\n"
+        "- *По калориям*: по каждому дню: съеденные ккал − TDEE (мин 0) → «набрано по калориям».\n\n"
+        "- В зачёт идёт максимум из двух величин.\n"
+        "- Прогноз считается по среднему за *последние 7 дней*.\n"
+        "- Прогресс показывается двумя барами: по весу и по калориям.\n\n"
         "Команды:\n"
         "/start — создать или показать профиль\n"
         "/add — добавить калории\n"
@@ -1894,13 +2165,17 @@ def build_user_context(user_id: int) -> str:
         return "Пользователь не найден в базе."
     entries = load_entries_for_user(user_id)
     deficit = compute_deficit_with_history(profile, entries)
+    gaining = profile.is_gaining
+    mode_str = "набор веса" if gaining else "похудение"
+    remaining_str = "Осталось набрать до цели" if gaining else "Осталось сжечь до цели"
     lines = [
         "Данные пользователя из бота:",
+        f"Режим: {mode_str}.",
         f"Вес: {profile.current_weight:.1f} кг, цель: {profile.target_weight:.1f} кг.",
         f"Лимит калорий: {profile.calorie_limit} ккал/день.",
         f"Рост: {profile.height_cm} см, возраст: {profile.age}, пол: {profile.gender}.",
         f"TDEE (расход): {deficit.get('tdee', profile.calculate_tdee()):.0f} ккал.",
-        f"Осталось сжечь до цели: {format_ru_number(deficit.get('deficit_remaining', 0))} ккал.",
+        f"{remaining_str}: {format_ru_number(deficit.get('deficit_remaining', 0))} ккал.",
     ]
     if entries:
         by_date = defaultdict(int)
@@ -1908,9 +2183,28 @@ def build_user_context(user_id: int) -> str:
             by_date[e.date] += e.calories
         recent = sorted(by_date.items(), reverse=True)[:14]
         lines.append("Калории по дням (последние 2 недели): " + ", ".join(f"{d}: {c}" for d, c in recent))
-        with_ex = [(e.date, e.exercises) for e in entries if e.exercises and e.exercises.strip()]
-        if with_ex:
-            lines.append("Тренировки: " + "; ".join(f"{d}: {e[:50]}..." if len(e) > 50 else f"{d}: {e}" for d, e in with_ex[-10:]))
+        # Тренировки из workouts.csv (основной источник)
+        wkts = load_workouts(user_id=user_id)
+        if wkts:
+            wkts_sorted = sorted(wkts, key=lambda x: x[0], reverse=True)[:14]
+            wkts_lines = [
+                f"{d.strftime('%d.%m')}: {desc[:60]}{'...' if len(desc) > 60 else ''}"
+                for d, _, _, desc in wkts_sorted if desc
+            ]
+            if wkts_lines:
+                lines.append("Тренировки (последние 14 записей): " + "; ".join(wkts_lines))
+        else:
+            with_ex = [(e.date, e.exercises) for e in entries if e.exercises and e.exercises.strip()]
+            if with_ex:
+                lines.append("Тренировки: " + "; ".join(
+                    f"{d}: {e[:50]}..." if len(e) > 50 else f"{d}: {e}" for d, e in with_ex[-10:]
+                ))
+        # Звание, стрик и читмилы для контекста LLM
+        streak = compute_streak(user_id, entries, profile.calorie_limit)
+        lines.append(f"Звание: {profile.role.value}")
+        lines.append(f"Стрик (дней без нарушений): {streak}")
+        if profile.cheat_meals > 0:
+            lines.append(f"Читмилы доступны: {profile.cheat_meals} шт.")
     return "\n".join(lines)
 
 
@@ -2250,6 +2544,55 @@ async def sports_calendar_month_cb(update: Update, context: ContextTypes.DEFAULT
 
 # --- Мои записи об упражнениях ---
 
+def delete_workout_from_csv(user_id: int, workout_date: date) -> bool:
+    """Удаляет тренировку из workouts.csv и очищает exercises в entries.csv."""
+    deleted = False
+    if WORKOUTS_CSV.exists():
+        rows: List[Dict] = []
+        with WORKOUTS_CSV.open("r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("user_id") == str(user_id) and row.get("date") == workout_date.isoformat():
+                    deleted = True
+                    continue
+                rows.append(row)
+        with WORKOUTS_CSV.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["date", "user_id", "username", "description"])
+            writer.writeheader()
+            writer.writerows(rows)
+    rows_ent: List[Dict] = []
+    with ENTRIES_CSV.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            row = dict(row)
+            row.setdefault("exercises", "")
+            if row["user_id"] == str(user_id) and row["date"] == workout_date.isoformat():
+                row["exercises"] = ""
+            rows_ent.append(row)
+    with ENTRIES_CSV.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["date", "user_id", "username", "calories", "weight", "exercises"])
+        writer.writeheader()
+        writer.writerows(rows_ent)
+    return deleted
+
+
+def _build_exercises_keyboard(workouts_list: list) -> tuple:
+    """Строит список строк и inline-клавиатуру для просмотра/удаления тренировок."""
+    lines = ["📋 *Мои тренировки* (нажми 🗑 для удаления):\n"]
+    keyboard = []
+    for d, _, _, desc in workouts_list[:20]:
+        if not desc:
+            continue
+        short = desc[:80] + ("…" if len(desc) > 80 else "")
+        lines.append(f"📅 {d.strftime('%d.%m.%Y')}: {short}")
+        keyboard.append([InlineKeyboardButton(
+            f"🗑 {d.strftime('%d.%m.%Y')}",
+            callback_data=f"delworkout_{d.isoformat()}"
+        )])
+    keyboard.append([InlineKeyboardButton("✅ Закрыть", callback_data="delworkout_close")])
+    return lines, keyboard
+
+
 async def view_my_exercises(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_allowed(update):
         return
@@ -2259,13 +2602,53 @@ async def view_my_exercises(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     workouts = load_workouts(user_id=tg_user.id)
     workouts.sort(key=lambda x: x[0], reverse=True)
     if not workouts:
-        await update.message.reply_text("Пока нет записей об упражнениях. Добавь тренировку через «🏃 Добавить тренировку».", reply_markup=MAIN_MENU_KEYBOARD)
+        await update.message.reply_text(
+            "Пока нет записей об упражнениях. Добавь тренировку через «🏃 Добавить тренировку».",
+            reply_markup=MAIN_MENU_KEYBOARD
+        )
         return
-    lines = ["📋 Твои записи об упражнениях:\n"]
-    for d, _, _, desc in workouts[:50]:
-        if desc:
-            lines.append(f"📅 {d.strftime('%d.%m.%Y')}: {desc[:200]}{'…' if len(desc) > 200 else ''}")
-    await update.message.reply_text("\n".join(lines)[:4000], reply_markup=MAIN_MENU_KEYBOARD)
+    lines, keyboard = _build_exercises_keyboard(workouts)
+    await update.message.reply_text(
+        "\n".join(lines)[:4000],
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+
+async def delete_workout_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Callback для удаления тренировки по inline-кнопке."""
+    query = update.callback_query
+    await query.answer()
+    if query.data == "delworkout_close":
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text("Главное меню:", reply_markup=MAIN_MENU_KEYBOARD)
+        return
+    if not query.data.startswith("delworkout_"):
+        return
+    date_str = query.data.replace("delworkout_", "")
+    try:
+        workout_date = date.fromisoformat(date_str)
+    except ValueError:
+        return
+    tg_user = query.from_user
+    if not tg_user:
+        return
+    deleted = delete_workout_from_csv(tg_user.id, workout_date)
+    if deleted:
+        workouts = load_workouts(user_id=tg_user.id)
+        workouts.sort(key=lambda x: x[0], reverse=True)
+        if not workouts:
+            await query.edit_message_text("Все тренировки удалены.", reply_markup=None)
+            await query.message.reply_text("Главное меню:", reply_markup=MAIN_MENU_KEYBOARD)
+            return
+        lines, keyboard = _build_exercises_keyboard(workouts)
+        await query.edit_message_text(
+            "\n".join(lines)[:4000],
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    else:
+        await query.answer("Запись не найдена или уже удалена.")
 
 
 # --- Рейтинг ---
@@ -2350,6 +2733,53 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text(
             "⚠️ Произошла ошибка. Попробуйте позже."
         )
+# --- Изменить диету ---
+
+async def change_diet_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Начало процесса смены диеты с предупреждением."""
+    if not is_allowed(update):
+        return ConversationHandler.END
+    keyboard = ReplyKeyboardMarkup(
+        [["✅ Да, хочу изменить диету"], ["❌ Отмена"]],
+        resize_keyboard=True,
+    )
+    await update.message.reply_text(
+        "⚠️ *ВНИМАНИЕ!* ⚠️\n\n"
+        "При изменении диеты будут *удалены все данные профиля*:\n"
+        "• Текущий вес, целевой вес, лимит калорий\n"
+        "• Рост, возраст, пол, активность\n\n"
+        "История калорий и тренировок *сохранится*.\n\n"
+        "Ты уверен, что хочешь начать заново?",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
+    return CHANGE_DIET_CONFIRM
+
+
+async def change_diet_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Подтверждение — удаляем профиль и запускаем онбординг заново."""
+    if not is_allowed(update):
+        return ConversationHandler.END
+    text = update.message.text.strip().lower()
+    if "да" not in text and "изменить" not in text:
+        await update.message.reply_text("Отмена. Возвращаемся в главное меню.", reply_markup=MAIN_MENU_KEYBOARD)
+        return ConversationHandler.END
+    tg_user = update.effective_user
+    if not tg_user:
+        return ConversationHandler.END
+    users = load_users()
+    if tg_user.id in users:
+        del users[tg_user.id]
+        save_users(users)
+    context.user_data.clear()
+    await update.message.reply_text(
+        "✅ Профиль удалён. Начнём заново!\n\n"
+        "Введи текущий вес в кг (например: 83.5):",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    return ONBOARD_WEIGHT
+
+
 def build_application() -> "ApplicationBuilder":
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -2515,7 +2945,27 @@ def build_application() -> "ApplicationBuilder":
     app.add_handler(sports_cal_conv)
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("^📋 Мои записи об упражнениях$"), view_my_exercises))
+    app.add_handler(CallbackQueryHandler(delete_workout_cb, pattern="^delworkout_"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("^🏆 Рейтинг$"), show_ranking))
+
+    # Изменить диету
+    change_diet_conv = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("^🔄 Изменить диету$"), change_diet_start),
+        ],
+        states={
+            CHANGE_DIET_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, change_diet_confirm)],
+            ONBOARD_WEIGHT:      [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_weight)],
+            ONBOARD_TARGET:      [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_target)],
+            ONBOARD_LIMIT:       [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_limit)],
+            ONBOARD_HEIGHT:      [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_height)],
+            ONBOARD_AGE:         [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_age)],
+            ONBOARD_GENDER:      [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_gender)],
+            ONBOARD_ACTIVITY:    [MessageHandler(filters.TEXT & ~filters.COMMAND, onboard_activity)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    app.add_handler(change_diet_conv)
 
     # Планировщик напоминаний: каждый день в 15:00 и 22:00 по Москве
     job_queue = app.job_queue
