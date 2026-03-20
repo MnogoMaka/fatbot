@@ -1336,10 +1336,10 @@ async def add_calories_entry(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not is_allowed(update):
         return ConversationHandler.END
     await update.message.reply_text(
-        "Как добавить калории?",
-        reply_markup=ADD_CALORIES_CHOICE_KEYBOARD,
+        "Введи количество калорий (число суммируется к дню):",
+        reply_markup=ReplyKeyboardRemove(),
     )
-    return ADD_CALORIES_CHOICE
+    return ADD_CALORIES
 
 
 async def handle_add_calories_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1495,46 +1495,34 @@ async def handle_add_calories_gramms(update: Update, context: ContextTypes.DEFAU
     return ConversationHandler.END
 
 
-async def handle_add_calories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if not is_allowed(update):
-        return ConversationHandler.END
-    try:
-        calories = int(update.message.text)
-        if calories < 0:
-            raise ValueError
-    except (TypeError, ValueError):
-        await update.message.reply_text("Введи положительное целое число.")
-        return ADD_CALORIES
-
-    users = load_users()
-    tg_user = update.effective_user
-    assert tg_user is not None
-
-    if tg_user.id not in users:
-        await update.message.reply_text("Сначала введи профиль командой /start.")
-        return ConversationHandler.END
-
-    entry = DailyEntry(date=date.today(), user_id=tg_user.id, username=tg_user.username or "", calories=calories)
+async def _do_save_calories(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    tg_user,
+    users,
+    calories: int,
+    target_date,
+) -> int:
+    """Saves calories for target_date and sends confirmation."""
+    entry = DailyEntry(date=target_date, user_id=tg_user.id, username=tg_user.username or "", calories=calories)
     append_or_update_entry(entry)
-    logger.info(f"User {tg_user.username} added {calories} kcal")
+    logger.info(f"User {tg_user.username} added {calories} kcal for {target_date}")
 
     profile = users[tg_user.id]
-    # Пересчитываем дефицит с учётом всей истории и сегодняшних калорий
     all_entries = load_entries_for_user(tg_user.id)
     deficit = compute_deficit_with_history(profile, all_entries)
     insult = get_bad_phrase()
     gaining = profile.is_gaining
     remaining_label = "Осталось набрать до цели" if gaining else "Осталось сжечь до цели"
+    date_label = f" (за {target_date.strftime('%d.%m')})" if target_date != date.today() else ""
     await update.message.reply_text(
-        f"Записал +{calories} ккал.\n"
+        f"Записал +{calories} ккал{date_label}.\n"
         f"{insult}\n"
         f"{remaining_label}: {format_ru_number(deficit['deficit_remaining'])} ккал",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
 
-    # Уведомление при превышении / недоборе лимита
     today_cals = int(deficit["today_calories"])
-    # Жиробас только при превышении > 10% лимита
     ccl = profile.calorie_limit
     if not profile.is_gaining and today_cals > ccl * 1.10:
         if profile.cheat_meals > 0:
@@ -1558,15 +1546,84 @@ async def handle_add_calories(update: Update, context: ContextTypes.DEFAULT_TYPE
                         )
                     except Exception as e:
                         logger.warning(f"Не удалось отправить сообщение {prof.username} ({other_uid}): {e}")
-    # Начисляем читмил при стрике >= 14 дней
     awarded_cal = check_and_award_cheat_meal(profile, all_entries, users)
     if awarded_cal:
         streak_now = compute_streak(tg_user.id, all_entries, profile.calorie_limit)
         await update.message.reply_text(
             f"🎉 Стрик {streak_now} дней без нарушений! +1 читмил. Всего: {profile.cheat_meals}"
         )
-
     return ConversationHandler.END
+
+
+async def handle_add_calories(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_allowed(update):
+        return ConversationHandler.END
+    try:
+        calories = int(update.message.text)
+        if calories < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        await update.message.reply_text("Введи положительное целое число.")
+        return ADD_CALORIES
+
+    users = load_users()
+    tg_user = update.effective_user
+    assert tg_user is not None
+
+    if tg_user.id not in users:
+        await update.message.reply_text("Сначала введи профиль командой /start.")
+        return ConversationHandler.END
+
+    # Check if time is between 00:00 and 02:00 — offer to log for yesterday
+    now_msk = datetime.now(MOSCOW_TZ)
+    if 0 <= now_msk.hour < 2:
+        context.user_data["pending_calories"] = calories
+        context.user_data["pending_users"] = users
+        today = date.today()
+        yesterday = today - timedelta(days=1)
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    f"📅 Сегодня ({today.strftime('%d.%m')})",
+                    callback_data="add_cal_day_today"
+                ),
+                InlineKeyboardButton(
+                    f"📅 Вчера ({yesterday.strftime('%d.%m')})",
+                    callback_data="add_cal_day_yesterday"
+                ),
+            ]
+        ])
+        await update.message.reply_text(
+            f"За какой день записать {calories} ккал?",
+            reply_markup=keyboard,
+        )
+        return ADD_CALORIES_CHOICE
+
+    return await _do_save_calories(update, context, tg_user, users, calories, date.today())
+
+
+async def handle_add_calories_day_cb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Callback for the today/yesterday inline keyboard after midnight."""
+    query = update.callback_query
+    await query.answer()
+
+    calories = context.user_data.get("pending_calories")
+    users = context.user_data.get("pending_users")
+    tg_user = update.effective_user
+
+    if calories is None or users is None or tg_user is None:
+        await query.edit_message_text("Что-то пошло не так, попробуй снова.")
+        return ConversationHandler.END
+
+    if query.data == "add_cal_day_yesterday":
+        target_date = date.today() - timedelta(days=1)
+    else:
+        target_date = date.today()
+
+    await query.edit_message_reply_markup(reply_markup=None)
+    # Reload users to get fresh data
+    users = load_users()
+    return await _do_save_calories(query, context, tg_user, users, calories, target_date)
 
 
 # --- Вес ---
@@ -2797,7 +2854,10 @@ def build_application() -> "ApplicationBuilder":
     if not token:
         raise RuntimeError("Не задан TELEGRAM_BOT_TOKEN в переменных окружения.")
 
-    app = ApplicationBuilder().token(token).build()
+    from telegram.request import HTTPXRequest
+    proxy_url = os.getenv("TELEGRAM_PROXY", "socks5://QqQT5Y7N9w:KSMKLRCyFg@45.147.31.223:39785")
+    request = HTTPXRequest(proxy=proxy_url)
+    app = ApplicationBuilder().token(token).request(request).build()
 
     app.add_error_handler(error_handler)
 
@@ -2821,8 +2881,8 @@ def build_application() -> "ApplicationBuilder":
             MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex("^🍔 Добавить калории$"), add_calories_entry),
         ],
         states={
-            ADD_CALORIES_CHOICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_calories_choice)],
             ADD_CALORIES: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_calories)],
+            ADD_CALORIES_CHOICE: [CallbackQueryHandler(handle_add_calories_day_cb, pattern="^add_cal_day_")],
             ADD_CALORIES_BARCODE: [
                 MessageHandler(filters.PHOTO, handle_add_calories_barcode),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_calories_barcode),

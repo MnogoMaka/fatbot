@@ -8,3 +8,4 @@ requests
 certifi
 pyopenssl
 pyzbar
+httpx[socks]
